@@ -1,0 +1,40 @@
+{
+  "name": "ostudio-web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build:packages && npm run build --workspace @ostudio/client && npm run build --workspace @ostudio/server",
+    "build:packages": "npm run build --workspace @ostudio/contracts && npm run build --workspace @ostudio/application && npm run build --workspace @ostudio/node-opcua-adapter && npm run build --workspace @ostudio/test-support",
+    "dev": "npm run build:packages && npm run dev --workspace @ostudio/client",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "typecheck": "npm run build:packages && npm run typecheck --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.58.2",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^24.10.13",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "eslint": "^10.0.2",
+    "globals": "^17.4.0",
+    "jsdom": "^28.1.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.68.0",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.0"
+  }
+}

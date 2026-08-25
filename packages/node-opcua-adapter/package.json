@@ -1,0 +1,23 @@
+{
+  "name": "@ostudio/node-opcua-adapter",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean --sourcemap --external node-opcua",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ostudio/application": "*",
+    "node-opcua": "^2.178.0"
+  }
+}

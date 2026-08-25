@@ -1,0 +1,22 @@
+{
+  "name": "@ostudio/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsup src/main.ts --format esm --clean --sourcemap",
+    "dev": "node --enable-source-maps --import tsx src/main.ts",
+    "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fastify/static": "^10.1.3",
+    "@ostudio/application": "*",
+    "@ostudio/contracts": "*",
+    "@ostudio/node-opcua-adapter": "*",
+    "fastify": "^5.12.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0"
+  }
+}
