@@ -1,6 +1,6 @@
 # Agent guidance
 
-Read `CONTEXT.md` before changing product behavior. Durable architecture decisions live in `docs/adr/`, and the implementation sequence lives in `docs/plans/`.
+Read `CONTEXT.md` before changing product behavior. Durable architecture decisions live in `docs/adr/`, and the implementation sequence lives in `docs/plans/`. Issues are tracked in `kevin-rieck/ostudio-web`; see `docs/agents/issue-tracker.md` and `docs/agents/triage-labels.md`.
 
 ## Product language
 
