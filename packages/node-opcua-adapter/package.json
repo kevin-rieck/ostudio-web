@@ -18,6 +18,6 @@
   },
   "dependencies": {
     "@ostudio/application": "*",
-    "node-opcua": "^2.178.0"
+    "node-opcua": "^2.179.0"
   }
 }
