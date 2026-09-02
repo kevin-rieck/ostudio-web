@@ -1,0 +1,506 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "OPC UA Studio private web transport",
+    "version": "1.0.0",
+    "description": "Private same-origin JSON HTTP and Server-Sent Events contract for OPC UA Studio Web."
+  },
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "servers": [{ "url": "/" }],
+  "paths": {
+    "/health/live": {
+      "get": {
+        "operationId": "getLiveness",
+        "responses": {
+          "200": {
+            "description": "The process is alive.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HealthStatus" } } }
+          }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "operationId": "getReadiness",
+        "responses": {
+          "200": {
+            "description": "Startup, configuration, and storage migration are ready.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HealthStatus" } } }
+          },
+          "503": {
+            "description": "The process is alive but not ready.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HealthStatus" } } }
+          }
+        }
+      }
+    },
+    "/api/v1/build": {
+      "get": {
+        "operationId": "getBuildInfo",
+        "security": [{ "sessionCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "Build identity used by snapshots and events.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/BuildInfo" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/snapshot": {
+      "get": {
+        "operationId": "getSnapshot",
+        "security": [{ "sessionCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "Authoritative application state and sequence watermark.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Snapshot" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "operationId": "attachEvents",
+        "security": [{ "sessionCookie": [] }],
+        "parameters": [
+          {
+            "name": "afterSequence",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 0 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sequenced Server-Sent Events. A gap or build mismatch requires a snapshot.",
+            "content": { "text/event-stream": { "schema": { "type": "string" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/diagnostics": {
+      "get": {
+        "operationId": "getDiagnosticReport",
+        "security": [{ "sessionCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "Bounded sanitized diagnostic records.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DiagnosticReport" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/controller/attach": {
+      "post": {
+        "operationId": "attachController",
+        "security": [{ "sessionCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "Controller attached or observer state returned.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControllerState" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/ControllerUnavailable" }
+        }
+      }
+    },
+    "/api/v1/controller/takeover": {
+      "post": {
+        "operationId": "takeOverController",
+        "security": [{ "sessionCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "The authenticated browser now owns the controller lease.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControllerState" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/controller/renew": {
+      "post": {
+        "operationId": "renewControllerLease",
+        "security": [{ "sessionCookie": [] }],
+        "responses": {
+          "204": { "description": "The current controller lease was renewed." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/StaleController" }
+        }
+      }
+    },
+    "/api/v1/mutations/prepare": {
+      "post": {
+        "operationId": "prepareMutation",
+        "security": [{ "sessionCookie": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PrepareMutationRequest" } } }
+        },
+        "responses": {
+          "201": {
+            "description": "A one-time challenge was prepared. Bound inputs are retained server-side and are not returned.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PrepareMutationResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/SafetyConflict" },
+          "413": { "$ref": "#/components/responses/RequestTooLarge" }
+        }
+      }
+    },
+    "/api/v1/mutations/{operationId}/confirm": {
+      "post": {
+        "operationId": "confirmMutation",
+        "security": [{ "sessionCookie": [] }],
+        "parameters": [
+          {
+            "name": "operationId",
+            "in": "path",
+            "required": true,
+            "schema": { "$ref": "#/components/schemas/OperationId" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConfirmMutationRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Retained or newly completed operation outcome.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationOutcome" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/SafetyConflict" },
+          "410": { "$ref": "#/components/responses/ChallengeExpired" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "sessionCookie": { "type": "apiKey", "in": "cookie", "name": "ostudio_session" }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "Authentication is required or the session has expired.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
+      },
+      "BadRequest": {
+        "description": "The request is invalid.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
+      },
+      "ControllerUnavailable": {
+        "description": "The browser is authenticated but cannot attach the controller.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
+      },
+      "StaleController": {
+        "description": "The controller generation is no longer current.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
+      },
+      "SafetyConflict": {
+        "description": "A controller, connection, or safety generation changed.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
+      },
+      "ChallengeExpired": {
+        "description": "The one-time challenge is expired or already consumed.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
+      },
+      "RequestTooLarge": {
+        "description": "The request exceeds the 1 MiB body limit.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
+      }
+    },
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "message", "correlationId"],
+        "properties": {
+          "code": { "$ref": "#/components/schemas/ErrorCode" },
+          "message": { "type": "string", "minLength": 1, "maxLength": 240 },
+          "correlationId": { "$ref": "#/components/schemas/CorrelationId" },
+          "operationId": { "$ref": "#/components/schemas/OperationId" },
+          "retryable": { "type": "boolean" }
+        }
+      },
+      "ErrorCode": {
+        "type": "string",
+        "enum": [
+          "authentication_required",
+          "bad_request",
+          "confirmation_required",
+          "controller_required",
+          "controller_generation_mismatch",
+          "challenge_expired",
+          "connection_required",
+          "mutation_not_allowed",
+          "operation_id_limit_reached",
+          "operation_result_unavailable",
+          "origin_rejected",
+          "request_too_large",
+          "safety_generation_mismatch",
+          "watchlist_limit_reached",
+          "browse_budget_exhausted"
+        ]
+      },
+      "BuildInfo": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["buildVersion"],
+        "properties": { "buildVersion": { "type": "string", "minLength": 1, "maxLength": 64 } }
+      },
+      "HealthStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status"],
+        "properties": { "status": { "type": "string", "enum": ["ok", "ready"] } }
+      },
+      "Snapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sequence", "buildVersion", "generatedAt", "controller", "safety", "connection", "nodes"],
+        "properties": {
+          "sequence": { "type": "integer", "minimum": 0 },
+          "buildVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "generatedAt": { "type": "string", "format": "date-time" },
+          "controller": { "$ref": "#/components/schemas/ControllerState" },
+          "safety": { "$ref": "#/components/schemas/SafetyState" },
+          "connection": { "$ref": "#/components/schemas/ConnectionSummary" },
+          "selectedNodeId": { "type": "string", "maxLength": 512 },
+          "nodes": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/components/schemas/AddressSpaceNode" } }
+        }
+      },
+      "ControllerState": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "controllerGeneration"],
+        "properties": {
+          "role": { "type": "string", "enum": ["controller", "observer"] },
+          "controllerGeneration": { "type": "integer", "minimum": 0 },
+          "leaseExpiresAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "SafetyState": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["readOnly", "safetyGeneration"],
+        "properties": {
+          "readOnly": { "type": "boolean" },
+          "safetyGeneration": { "type": "integer", "minimum": 0 },
+          "reason": { "type": "string", "maxLength": 120 }
+        }
+      },
+      "ConnectionSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["state"],
+        "properties": {
+          "state": { "type": "string", "enum": ["disconnected", "connecting", "connected", "recovering", "lost"] },
+          "endpoint": { "type": "string", "maxLength": 2048 },
+          "securityPolicy": { "type": "string", "maxLength": 128 },
+          "securityMode": { "type": "string", "enum": ["None", "Sign", "SignAndEncrypt"] },
+          "identityStatus": { "type": "string", "enum": ["unverified", "verified", "replacementPending", "notApplicable"] },
+          "serverCertificate": { "$ref": "#/components/schemas/ServerCertificateSummary" },
+          "clientCertificate": { "$ref": "#/components/schemas/CertificateReference" }
+        }
+      },
+      "ServerCertificateSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["algorithm", "fingerprint"],
+        "properties": {
+          "algorithm": { "type": "string", "enum": ["sha256"] },
+          "fingerprint": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+        }
+      },
+      "CertificateReference": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["displayName", "reference"],
+        "properties": {
+          "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "reference": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,256}$" }
+        }
+      },
+      "AddressSpaceNode": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["nodeId", "nodeClass", "browseName", "displayName"],
+        "properties": {
+          "nodeId": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "nodeClass": { "type": "string", "enum": ["Object", "Variable", "Method", "View", "DataType", "ReferenceType", "ObjectType", "VariableType"] },
+          "browseName": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "displayName": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "dataType": { "type": "string", "maxLength": 128 },
+          "access": { "type": "string", "enum": ["read", "readWrite", "none"] },
+          "liveValue": { "$ref": "#/components/schemas/LiveValue" }
+        }
+      },
+      "LiveValue": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["displayValue", "status", "stale"],
+        "properties": {
+          "displayValue": { "type": "string", "maxLength": 4096 },
+          "status": { "type": "string", "maxLength": 128 },
+          "sourceTimestamp": { "type": "string", "format": "date-time" },
+          "serverTimestamp": { "type": "string", "format": "date-time" },
+          "stale": { "type": "boolean" },
+          "outOfRange": { "type": "boolean" }
+        }
+      },
+      "EventEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sequence", "buildVersion", "type", "payload"],
+        "properties": {
+          "sequence": { "type": "integer", "minimum": 1 },
+          "buildVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "type": { "type": "string", "enum": ["snapshot-required", "ownership-changed", "safety-changed", "connection-changed", "live-value-changed"] },
+          "payload": {
+            "oneOf": [
+              { "$ref": "#/components/schemas/SnapshotRequiredPayload" },
+              { "$ref": "#/components/schemas/OwnershipChangedPayload" },
+              { "$ref": "#/components/schemas/SafetyChangedPayload" },
+              { "$ref": "#/components/schemas/ConnectionChangedPayload" },
+              { "$ref": "#/components/schemas/LiveValueChangedPayload" }
+            ]
+          }
+        }
+      },
+      "SnapshotRequiredPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["reason"],
+        "properties": { "reason": { "type": "string", "enum": ["initial", "reconnect", "gap", "version-mismatch", "slow-client"] } }
+      },
+      "OwnershipChangedPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "controllerGeneration"],
+        "properties": {
+          "role": { "type": "string", "enum": ["controller", "observer"] },
+          "controllerGeneration": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "SafetyChangedPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["readOnly", "safetyGeneration"],
+        "properties": {
+          "readOnly": { "type": "boolean" },
+          "safetyGeneration": { "type": "integer", "minimum": 0 },
+          "reason": { "type": "string", "maxLength": 120 }
+        }
+      },
+      "ConnectionChangedPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["state"],
+        "properties": {
+          "state": { "type": "string", "enum": ["disconnected", "connecting", "connected", "recovering", "lost"] },
+          "identityStatus": { "type": "string", "enum": ["unverified", "verified", "replacementPending", "notApplicable"] }
+        }
+      },
+      "LiveValueChangedPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["nodeId", "liveValue"],
+        "properties": {
+          "nodeId": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "liveValue": { "$ref": "#/components/schemas/LiveValue" }
+        }
+      },
+      "DiagnosticReport": {
+        "type": "array",
+        "maxItems": 1000,
+        "items": { "$ref": "#/components/schemas/DiagnosticRecord" }
+      },
+      "DiagnosticRecord": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["actor", "endpoint", "controllerGeneration", "operationId", "correlationId", "outcome"],
+        "properties": {
+          "actor": { "type": "string", "maxLength": 64 },
+          "endpoint": { "type": "string", "maxLength": 2048 },
+          "controllerGeneration": { "type": "integer", "minimum": 0 },
+          "nodeId": { "type": "string", "maxLength": 512 },
+          "operationId": { "$ref": "#/components/schemas/OperationId" },
+          "correlationId": { "$ref": "#/components/schemas/CorrelationId" },
+          "outcome": { "type": "string", "enum": ["succeeded", "rejected", "unknown"] }
+        }
+      },
+      "OperationId": {
+        "type": "string",
+        "pattern": "^op-[A-Za-z0-9]{20,64}$",
+        "minLength": 23,
+        "maxLength": 67
+      },
+      "CorrelationId": {
+        "type": "string",
+        "pattern": "^cor-[A-Za-z0-9]{20,64}$",
+        "minLength": 24,
+        "maxLength": 68
+      },
+      "MutationKind": {
+        "type": "string",
+        "enum": ["variable-write", "method-call"]
+      },
+      "PrepareMutationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["operationId", "kind", "targetNodeId", "inputDigest"],
+        "properties": {
+          "operationId": { "$ref": "#/components/schemas/OperationId" },
+          "kind": { "$ref": "#/components/schemas/MutationKind" },
+          "targetNodeId": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "inputDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+        }
+      },
+      "PrepareMutationResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["challenge"],
+        "properties": { "challenge": { "$ref": "#/components/schemas/MutationChallenge" } }
+      },
+      "MutationChallenge": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["operationId", "challenge", "expiresAt", "controllerGeneration", "connectionGeneration", "safetyGeneration"],
+        "properties": {
+          "operationId": { "$ref": "#/components/schemas/OperationId" },
+          "challenge": { "type": "string", "minLength": 32, "maxLength": 256 },
+          "expiresAt": { "type": "string", "format": "date-time" },
+          "controllerGeneration": { "type": "integer", "minimum": 0 },
+          "connectionGeneration": { "type": "integer", "minimum": 0 },
+          "safetyGeneration": { "type": "integer", "minimum": 0 },
+          "kind": { "$ref": "#/components/schemas/MutationKind" },
+          "targetNodeId": { "type": "string", "maxLength": 512 }
+        }
+      },
+      "ConfirmMutationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["challenge"],
+        "properties": { "challenge": { "type": "string", "minLength": 32, "maxLength": 256 } }
+      },
+      "OperationOutcome": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["operationId", "correlationId", "status"],
+        "properties": {
+          "operationId": { "$ref": "#/components/schemas/OperationId" },
+          "correlationId": { "$ref": "#/components/schemas/CorrelationId" },
+          "status": { "type": "string", "enum": ["succeeded", "rejected", "unknown", "retained"] },
+          "code": { "$ref": "#/components/schemas/ErrorCode" },
+          "completedAt": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  }
+}

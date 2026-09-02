@@ -1,0 +1,45 @@
+{
+  "fixtureVersion": "1.0.0",
+  "id": "scalar-normalization-v1",
+  "applicableTargets": ["desktop-and-web"],
+  "sourceVersion": "desktop-safety-1.0.0",
+  "kind": "scalar-normalization",
+  "description": "Supported scalar wire representations preserve OPC UA values.",
+  "cases": [
+    {
+      "dataType": "Boolean",
+      "input": true,
+      "normalized": true
+    },
+    {
+      "dataType": "Int32",
+      "input": -2147483648,
+      "normalized": -2147483648
+    },
+    {
+      "dataType": "UInt32",
+      "input": 4294967295,
+      "normalized": 4294967295
+    },
+    {
+      "dataType": "Int64",
+      "input": "-9223372036854775808",
+      "normalized": "-9223372036854775808"
+    },
+    {
+      "dataType": "UInt64",
+      "input": "18446744073709551615",
+      "normalized": "18446744073709551615"
+    },
+    {
+      "dataType": "DateTime",
+      "input": "2026-01-02T03:04:05.000Z",
+      "normalized": "2026-01-02T03:04:05.000Z"
+    }
+  ],
+  "rejected": [
+    { "dataType": "Int64", "input": "0007", "reason": "non-canonical-integer" },
+    { "dataType": "UInt64", "input": "+7", "reason": "non-canonical-integer" },
+    { "dataType": "Int32", "input": 1.5, "reason": "not-an-integer" }
+  ]
+}

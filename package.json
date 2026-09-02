@@ -12,6 +12,7 @@
   ],
   "scripts": {
     "build": "npm run build:packages && npm run build --workspace @ostudio/client && npm run build --workspace @ostudio/server",
+    "contract:check": "tsx scripts/check-contract.ts",
     "build:packages": "npm run build --workspace @ostudio/contracts && npm run build --workspace @ostudio/application && npm run build --workspace @ostudio/node-opcua-adapter && npm run build --workspace @ostudio/test-support",
     "dev": "npm run build:packages && npm run dev --workspace @ostudio/client",
     "lint": "eslint .",

@@ -1,0 +1,24 @@
+{
+  "fixtureVersion": "1.0.0",
+  "id": "search-ordering-v1",
+  "applicableTargets": ["desktop-and-web"],
+  "sourceVersion": "desktop-search-1.0.0",
+  "kind": "search-ordering",
+  "description": "Known Address Space metadata is ranked independently of arrival order.",
+  "query": "pressure",
+  "candidates": [
+    { "nodeId": "ns=2;s=unbrowsed-exact", "explicitBrowse": false, "match": "alias-exact", "distance": 1 },
+    { "nodeId": "ns=2;s=browsed-substring", "explicitBrowse": true, "match": "substring", "distance": 4 },
+    { "nodeId": "ns=2;s=browsed-browse", "explicitBrowse": true, "match": "browse-exact", "distance": 3 },
+    { "nodeId": "ns=2;s=browsed-alias", "explicitBrowse": true, "match": "alias-exact", "distance": 2 },
+    { "nodeId": "ns=2;s=unbrowsed-prefix", "explicitBrowse": false, "match": "prefix", "distance": 1 }
+  ],
+  "orderedNodeIds": [
+    "ns=2;s=browsed-alias",
+    "ns=2;s=browsed-browse",
+    "ns=2;s=browsed-substring",
+    "ns=2;s=unbrowsed-exact",
+    "ns=2;s=unbrowsed-prefix"
+  ],
+  "coverage": "incomplete-allowed"
+}

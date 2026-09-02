@@ -1,0 +1,20 @@
+{
+  "fixtureVersion": "1.0.0",
+  "id": "transport-safety-v1",
+  "applicableTargets": ["web"],
+  "kind": "transport-safety",
+  "description": "Private HTTP and SSE envelopes are bounded, sequenced, and safe to expose to a browser.",
+  "snapshot": {
+    "sequence": 41,
+    "buildVersion": "web-2026.09.02",
+    "connection": { "state": "connected", "identityStatus": "verified" },
+    "safety": { "readOnly": true, "safetyGeneration": 8 }
+  },
+  "event": {
+    "sequence": 42,
+    "buildVersion": "web-2026.09.02",
+    "type": "safety-changed",
+    "payload": { "readOnly": true, "safetyGeneration": 8 }
+  },
+  "rejectedFields": ["password", "cookie", "privateKey", "certificateContents", "hostPath", "variableMutationValue", "methodInputs", "methodOutputs"]
+}

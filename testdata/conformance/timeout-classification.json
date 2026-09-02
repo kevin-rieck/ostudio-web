@@ -1,0 +1,16 @@
+{
+  "fixtureVersion": "1.0.0",
+  "id": "timeout-classification-v1",
+  "applicableTargets": ["desktop-and-web"],
+  "sourceVersion": "desktop-safety-1.0.0",
+  "kind": "timeout-classification",
+  "description": "A deadline does not turn an unprovable mutation into a rejection.",
+  "defaultDeadlinesMilliseconds": { "read": 15000, "write": 15000, "methodCall": 30000 },
+  "cases": [
+    { "operation": "read", "completionEvidence": "none", "outcome": "timed_out", "readOnly": true },
+    { "operation": "write", "completionEvidence": "server-rejected", "outcome": "rejected", "readOnly": true },
+    { "operation": "write", "completionEvidence": "none", "outcome": "unknown", "readOnly": true },
+    { "operation": "method-call", "completionEvidence": "server-succeeded", "outcome": "succeeded", "readOnly": false },
+    { "operation": "method-call", "completionEvidence": "transport-lost", "outcome": "unknown", "readOnly": true }
+  ]
+}

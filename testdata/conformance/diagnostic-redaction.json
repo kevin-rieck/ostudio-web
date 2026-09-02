@@ -1,0 +1,33 @@
+{
+  "fixtureVersion": "1.0.0",
+  "id": "diagnostic-redaction-v1",
+  "applicableTargets": ["web"],
+  "kind": "diagnostic-redaction",
+  "description": "Diagnostic records retain safe correlation context but remove sensitive data.",
+  "record": {
+    "actor": "admin",
+    "endpoint": "opc.tcp://plc.example:4840",
+    "controllerGeneration": 7,
+    "nodeId": "ns=2;s=Tank.Level",
+    "operationId": "op-01J00000000000000000000000",
+    "correlationId": "cor-01J00000000000000000000000",
+    "outcome": "unknown",
+    "password": "must-not-survive",
+    "cookie": "must-not-survive",
+    "privateKey": "must-not-survive",
+    "hostPath": "C:\\certs\\client.key",
+    "variableMutationValue": 99,
+    "methodInputs": ["must-not-survive"],
+    "methodOutputs": ["must-not-survive"]
+  },
+  "safeRecord": {
+    "actor": "admin",
+    "endpoint": "opc.tcp://plc.example:4840",
+    "controllerGeneration": 7,
+    "nodeId": "ns=2;s=Tank.Level",
+    "operationId": "op-01J00000000000000000000000",
+    "correlationId": "cor-01J00000000000000000000000",
+    "outcome": "unknown"
+  },
+  "removedFields": ["password", "cookie", "privateKey", "hostPath", "variableMutationValue", "methodInputs", "methodOutputs"]
+}

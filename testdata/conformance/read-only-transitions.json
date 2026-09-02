@@ -1,0 +1,24 @@
+{
+  "fixtureVersion": "1.0.0",
+  "id": "read-only-transitions-v1",
+  "applicableTargets": ["desktop-and-web"],
+  "sourceVersion": "desktop-safety-1.0.0",
+  "kind": "read-only-transitions",
+  "description": "Safety and ownership transitions fail closed.",
+  "initialState": { "readOnly": true, "safetyGeneration": 1 },
+  "transitions": [
+    { "event": "successful-connection", "readOnly": true, "generationChanges": true },
+    { "event": "confirmed-disable", "readOnly": false, "generationChanges": true },
+    { "event": "controller-takeover", "readOnly": true, "generationChanges": true },
+    { "event": "controller-loss", "readOnly": true, "generationChanges": true },
+    { "event": "connection-loss", "readOnly": true, "generationChanges": true },
+    { "event": "logout", "readOnly": true, "generationChanges": true },
+    { "event": "shutdown", "readOnly": true, "generationChanges": true }
+  ],
+  "rejectedRequests": [
+    { "request": "disable-without-confirmation", "errorCode": "confirmation_required" },
+    { "request": "observer-mutation", "errorCode": "controller_required" },
+    { "request": "stale-controller-mutation", "errorCode": "controller_generation_mismatch" },
+    { "request": "enter-key-mutation", "errorCode": "confirmation_required" }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "fixtureVersion": "1.0.0",
+  "id": "limits-v1",
+  "applicableTargets": ["desktop-and-web"],
+  "sourceVersion": "desktop-limits-1.0.0",
+  "kind": "limits",
+  "description": "Bounded state rejects overflow without evicting protected state.",
+  "limits": [
+    { "name": "requestBodyBytes", "maximum": 1048576, "atMaximum": "accepted", "overMaximum": "request_too_large" },
+    { "name": "shallowBrowseRequests", "maximum": 250, "atMaximum": "accepted", "overMaximum": "browse_budget_exhausted" },
+    { "name": "watchlistNodes", "maximum": 100, "atMaximum": "accepted", "overMaximum": "watchlist_limit_reached" },
+    { "name": "trendPointsPerNode", "maximum": 500, "atMaximum": "accepted", "overMaximum": "oldest_point_evicted" },
+    { "name": "mutationIdsPerSession", "maximum": 1000, "atMaximum": "accepted", "overMaximum": "operation_id_limit_reached" }
+  ],
+  "rateLimitedBrowseIntervalMilliseconds": 1000
+}
