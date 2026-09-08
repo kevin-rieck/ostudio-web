@@ -137,6 +137,7 @@ an endpoint URL whose resolved address is already trusted or keep this product
 constraint explicit; do not advertise DNS/IP policy enforcement based only on a
 separate lookup.
 
-No production adapter behavior was promoted by this spike. The executable
-coverage is retained as the reusable capability test, and it uses only
-throwaway temporary certificates and an in-process disposable server.
+The production adapter in `packages/node-opcua-adapter` now uses these proven
+semantics. The executable coverage remains as a regression test and continues
+to use only throwaway temporary certificates and an in-process disposable
+server.
