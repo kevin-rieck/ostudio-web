@@ -14,7 +14,7 @@
     "@ostudio/application": "*",
     "@ostudio/contracts": "*",
     "@ostudio/node-opcua-adapter": "*",
-    "fastify": "^5.12.1"
+    "fastify": "^5.12.3"
   },
   "devDependencies": {
     "tsx": "^4.21.0"
