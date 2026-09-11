@@ -68,6 +68,9 @@ const DEFAULT_MAX_BROWSE_REQUESTS = 250;
 const DEFAULT_MAX_REFERENCES_PER_NODE = 0;
 const MAX_BROWSE_REQUESTS = 250;
 const MAX_REFERENCES_PER_NODE = 10_000;
+const MAX_VARIANT_ARRAY_LENGTH = 1_024;
+const MAX_VARIANT_DIMENSIONS = 1_024;
+const MAX_STRING_LENGTH = 4_096;
 const VALUE_ATTRIBUTE = AttributeIds.Value;
 const MIN_INT64 = -(1n << 63n);
 const MAX_INT64 = (1n << 63n) - 1n;
@@ -103,6 +106,10 @@ const dataTypeNodeIds: Record<number, OpcUaDataType> = {
 
 class DeadlineExceeded extends Error {}
 
+function boundedString(value: string): string {
+  return value.length <= MAX_STRING_LENGTH ? value : `${value.slice(0, MAX_STRING_LENGTH)}…`;
+}
+
 export class NodeOpcuaAdapterError extends Error {
   constructor(
     readonly code:
@@ -122,7 +129,6 @@ export class NodeOpcuaAdapterError extends Error {
 
 export interface NodeOpcuaAdapterOptions extends OpcUaClientOptions {
   clientCertificateManager?: RawOpcuaClientOptions["clientCertificateManager"];
-  clientFactory?: (options: RawOpcuaClientOptions) => RawOpcuaClient;
 }
 
 function withDeadline<T>(operation: Promise<T>, milliseconds: number): Promise<T> {
@@ -168,9 +174,9 @@ function securityPolicy(value: string | undefined): SecurityPolicy {
 function endpointProjection(endpoint: EndpointDescription): OpcUaEndpoint {
   const mode = MessageSecurityMode[endpoint.securityMode] as OpcUaEndpoint["securityMode"];
   return {
-    endpointUrl: (endpoint.endpointUrl ?? "").slice(0, 4_096),
+    endpointUrl: boundedString(endpoint.endpointUrl ?? ""),
     securityMode: mode,
-    securityPolicyUri: (endpoint.securityPolicyUri ?? "").slice(0, 4_096),
+    securityPolicyUri: boundedString(endpoint.securityPolicyUri ?? ""),
     serverCertificateFingerprint: mode === "None" ? undefined : fingerprint(endpoint.serverCertificate),
   };
 }
@@ -210,17 +216,67 @@ function methodMutationResult(
 function nodeIdDataType(value: unknown): OpcUaDataType | string | undefined {
   const text = String(value);
   const match = /^ns=0;i=(\d+)$/.exec(text);
-  return match ? dataTypeNodeIds[Number(match[1])] : text || undefined;
+  return match ? dataTypeNodeIds[Number(match[1])] : boundedString(text) || undefined;
+}
+
+function dimensions(value: unknown): number[] | null | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (!Array.isArray(value) && !ArrayBuffer.isView(value)) return null;
+  const length = Array.isArray(value)
+    ? value.length
+    : value instanceof DataView
+      ? 0
+      : (value as ArrayBufferView & { length?: number }).length ?? 0;
+  if (length > MAX_VARIANT_DIMENSIONS) return null;
+  const values = Array.from(value as ArrayLike<unknown>);
+  return values.every((item) => typeof item === "number" && Number.isSafeInteger(item) && item >= 0 && item <= MAX_VARIANT_ARRAY_LENGTH)
+    ? values as number[]
+    : null;
+}
+
+function variantShapeMatches(
+  variant: OpcUaVariant,
+  valueRank: number,
+  arrayDimensions?: number[],
+): boolean {
+  if (!Number.isInteger(valueRank) || valueRank < -3) return false;
+  const isScalar = variant.arrayType === "Scalar";
+  const actualDimensions = isScalar
+    ? []
+    : variant.dimensions ?? (variant.arrayType === "Array"
+      ? [Array.isArray(variant.value)
+        ? variant.value.length
+        : ArrayBuffer.isView(variant.value)
+          ? (variant.value as ArrayBufferView & { length?: number }).length ?? 0
+          : 0]
+      : []);
+  const rankMatches = valueRank === -1
+    ? isScalar
+    : valueRank === -2
+      ? true
+      : valueRank === -3
+        ? isScalar || (!isScalar && actualDimensions.length === 1)
+        : valueRank === 0
+          ? !isScalar
+          : !isScalar && valueRank > 0 && actualDimensions.length === valueRank;
+  if (!rankMatches) return false;
+  if (!arrayDimensions?.length) return true;
+  if (actualDimensions.length !== arrayDimensions.length) return false;
+  return arrayDimensions.every((expected, index) => expected === 0 || expected === actualDimensions[index]);
+}
+
+function variantMatchesArgument(variant: OpcUaVariant, argument: OpcUaMethodArgument): boolean {
+  return variant.dataType === argument.dataType && variantShapeMatches(variant, argument.valueRank, argument.arrayDimensions);
 }
 
 function argumentProjection(argument: Argument): OpcUaMethodArgument {
   const result: OpcUaMethodArgument = {
-    name: argument.name ?? "",
+    name: boundedString(argument.name ?? ""),
     dataType: nodeIdDataType(argument.dataType) ?? "",
     valueRank: argument.valueRank,
     description: projectLocalizedText(argument.description),
   };
-  if (argument.arrayDimensions?.length) result.arrayDimensions = [...argument.arrayDimensions];
+  if (argument.arrayDimensions?.length) result.arrayDimensions = argument.arrayDimensions.slice(0, MAX_VARIANT_DIMENSIONS);
   return result;
 }
 
@@ -248,7 +304,12 @@ function canonical64(value: TransportValue, signed: boolean): string {
 }
 
 function transportValue(value: TransportValue, dataType: DataType): unknown {
-  if (Array.isArray(value)) return value.map((item) => transportValue(item, dataType));
+  if (Array.isArray(value)) {
+    if (value.length > MAX_VARIANT_ARRAY_LENGTH) {
+      throw new NodeOpcuaAdapterError("invalid_request", "The requested OPC UA array is too large.");
+    }
+    return value.map((item) => transportValue(item, dataType));
+  }
   switch (dataType) {
     case DataType.Int64:
       return coerceInt64(canonical64(value, true));
@@ -273,11 +334,18 @@ function variantInput(value: OpcUaVariant): Variant {
     if (typeof arrayType !== "number") {
       throw new NodeOpcuaAdapterError("invalid_request", "The requested OPC UA array type is unsupported.");
     }
+    const variantDimensions = value.dimensions;
+    if (variantDimensions && (
+      variantDimensions.length > MAX_VARIANT_DIMENSIONS
+      || variantDimensions.some((dimension) => !Number.isSafeInteger(dimension) || dimension < 0 || dimension > MAX_VARIANT_ARRAY_LENGTH)
+    )) {
+      throw new NodeOpcuaAdapterError("invalid_request", "The requested OPC UA matrix dimensions are invalid.");
+    }
     const variant = new Variant({
       dataType,
       arrayType,
       value: transportValue(value.value, dataType),
-      dimensions: value.dimensions,
+      dimensions: variantDimensions,
     });
     if (!variant.isValid()) throw new NodeOpcuaAdapterError("invalid_request", "The requested OPC UA value is invalid.");
     return variant;
@@ -314,6 +382,7 @@ class NodeOpcuaSubscription implements OpcUaSubscription {
 
 class NodeOpcuaSession implements OpcUaSession {
   private readonly subscriptions = new Set<NodeOpcuaSubscription>();
+  private browseQueue = Promise.resolve();
   private closed = false;
 
   constructor(
@@ -327,6 +396,20 @@ class NodeOpcuaSession implements OpcUaSession {
 
   async browse(request: OpcUaBrowseRequest): Promise<OpcUaBrowseResult> {
     this.ensureOpen();
+    const previousBrowse = this.browseQueue;
+    let release!: () => void;
+    this.browseQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previousBrowse;
+    try {
+      return await this.browseLocked(request);
+    } finally {
+      release();
+    }
+  }
+
+  private async browseLocked(request: OpcUaBrowseRequest): Promise<OpcUaBrowseResult> {
     const maxRequests = boundedLimit(request.maxRequests, this.owner.maxBrowseRequests, MAX_BROWSE_REQUESTS) || 1;
     const maxReferencesPerNode = boundedLimit(
       request.maxReferencesPerNode,
@@ -462,52 +545,83 @@ class NodeOpcuaSession implements OpcUaSession {
 
   async write(request: OpcUaWriteRequest): Promise<OpcUaMutationResult> {
     this.ensureOpen();
+    if (!request.value || typeof request.value !== "object") {
+      return { outcome: "rejected", error: { code: "invalid_metadata", message: "Variable Node metadata or value is invalid." } };
+    }
     if (request.attributeId !== undefined && request.attributeId !== VALUE_ATTRIBUTE) {
       return { outcome: "rejected", error: { code: "invalid_metadata", message: "Only Variable Node values may be written." } };
     }
+
+    let metadata;
     try {
-      const metadata = await withDeadline(
+      metadata = await withDeadline(
         this.session.read([
           { nodeId: request.nodeId, attributeId: AttributeIds.NodeClass },
           { nodeId: request.nodeId, attributeId: AttributeIds.DataType },
+          { nodeId: request.nodeId, attributeId: AttributeIds.ValueRank },
+          { nodeId: request.nodeId, attributeId: AttributeIds.ArrayDimensions },
           { nodeId: request.nodeId, attributeId: AttributeIds.AccessLevel },
+          { nodeId: request.nodeId, attributeId: AttributeIds.UserAccessLevel },
         ]),
         this.owner.writeTimeout,
       );
-      if (metadata.some((item) => !item.statusCode.isGood() || !item.value)) {
-        return {
-          outcome: "rejected",
-          error: { code: "invalid_metadata", message: "Variable Node metadata could not be revalidated." },
-        };
-      }
-      const nodeClass = metadata[0]!.value.value;
-      const dataType = nodeIdDataType(metadata[1]!.value.value);
-      const accessLevel = Number(metadata[2]!.value.value);
-      if (nodeClass !== 2 || (accessLevel & AccessLevelFlag.CurrentWrite) === 0 || dataType !== request.value.dataType) {
-        return {
-          outcome: "rejected",
-          error: { code: "invalid_metadata", message: "Variable Node metadata does not permit this write." },
-        };
-      }
-      if (request.expectedDataType && request.expectedDataType !== dataType) {
-        return {
-          outcome: "rejected",
-          error: { code: "invalid_metadata", message: "Variable Node data type changed before the write." },
-        };
-      }
-      const statusCode = await withDeadline(
+    } catch {
+      return {
+        outcome: "rejected",
+        error: { code: "invalid_metadata", message: "Variable Node metadata could not be revalidated." },
+      };
+    }
+
+    if (metadata.length !== 6 || metadata.some((item) => !item.statusCode.isGood() || !item.value)) {
+      return {
+        outcome: "rejected",
+        error: { code: "invalid_metadata", message: "Variable Node metadata could not be revalidated." },
+      };
+    }
+    const nodeClass = metadata[0]!.value.value;
+    const dataType = nodeIdDataType(metadata[1]!.value.value);
+    const valueRank = Number(metadata[2]!.value.value);
+    const arrayDimensions = dimensions(metadata[3]!.value.value);
+    const accessLevel = Number(metadata[4]!.value.value);
+    const userAccessLevel = Number(metadata[5]!.value.value);
+    if (
+      nodeClass !== 2
+      || (accessLevel & AccessLevelFlag.CurrentWrite) === 0
+      || (userAccessLevel & AccessLevelFlag.CurrentWrite) === 0
+      || dataType !== request.value.dataType
+      || arrayDimensions === null
+      || !variantShapeMatches(request.value, valueRank, arrayDimensions)
+    ) {
+      return {
+        outcome: "rejected",
+        error: { code: "invalid_metadata", message: "Variable Node metadata does not permit this write." },
+      };
+    }
+    if (request.expectedDataType && request.expectedDataType !== dataType) {
+      return {
+        outcome: "rejected",
+        error: { code: "invalid_metadata", message: "Variable Node data type changed before the write." },
+      };
+    }
+
+    let statusCode;
+    try {
+      const input = variantInput(request.value);
+      statusCode = await withDeadline(
         this.session.write({
           nodeId: request.nodeId,
           attributeId: request.attributeId ?? VALUE_ATTRIBUTE,
-          value: { value: variantInput(request.value) },
+          value: { value: input },
         }),
         this.owner.writeTimeout,
       );
-      return mutationResult(statusCode);
     } catch (error) {
-      if (error instanceof NodeOpcuaAdapterError) return { outcome: "rejected", error: { code: "invalid_metadata", message: "Variable Node metadata or value is invalid." } };
+      if (error instanceof NodeOpcuaAdapterError) {
+        return { outcome: "rejected", error: { code: "invalid_metadata", message: "Variable Node metadata or value is invalid." } };
+      }
       return mutationFailure(error);
     }
+    return mutationResult(statusCode);
   }
 
   async inspectMethod(methodId: string): Promise<OpcUaMethodDefinition> {
@@ -515,8 +629,8 @@ class NodeOpcuaSession implements OpcUaSession {
     try {
       const definition = await withDeadline(this.session.getArgumentDefinition(methodId), this.owner.methodCallTimeout);
       return {
-        inputArguments: definition.inputArguments.map(argumentProjection),
-        outputArguments: definition.outputArguments.map(argumentProjection),
+        inputArguments: definition.inputArguments.slice(0, MAX_VARIANT_ARRAY_LENGTH).map(argumentProjection),
+        outputArguments: definition.outputArguments.slice(0, MAX_VARIANT_ARRAY_LENGTH).map(argumentProjection),
       };
     } catch (error) {
       if (error instanceof NodeOpcuaAdapterError) throw error;
@@ -529,6 +643,23 @@ class NodeOpcuaSession implements OpcUaSession {
     let definition: OpcUaMethodDefinition;
     try {
       definition = await this.inspectMethod(request.methodId);
+      const executable = await withDeadline(
+        this.session.read([
+          { nodeId: request.methodId, attributeId: AttributeIds.Executable },
+          { nodeId: request.methodId, attributeId: AttributeIds.UserExecutable },
+        ]),
+        this.owner.methodCallTimeout,
+      );
+      if (
+        executable.length !== 2
+        || executable.some((item) => !item.statusCode.isGood() || !item.value)
+        || executable.some((item) => item.value.value !== true)
+      ) {
+        return {
+          outcome: "rejected",
+          error: { code: "invalid_metadata", message: "The Method Node is not executable for this session." },
+        };
+      }
       if (request.expectedDefinition && !definitionEquals(definition, request.expectedDefinition)) {
         return {
           outcome: "rejected",
@@ -542,7 +673,8 @@ class NodeOpcuaSession implements OpcUaSession {
         };
       }
       for (const [index, argument] of request.inputArguments.entries()) {
-        if (definition.inputArguments[index]?.dataType !== argument.dataType) {
+        const expectedArgument = definition.inputArguments[index];
+        if (!expectedArgument || !variantMatchesArgument(argument, expectedArgument)) {
           return {
             outcome: "rejected",
             error: { code: "invalid_metadata", message: "Method input argument metadata changed." },
@@ -597,7 +729,7 @@ class NodeOpcuaSession implements OpcUaSession {
   }
 }
 
-export class NodeOpcuaAdapter implements OpcUaClient {
+class NodeOpcuaAdapter implements OpcUaClient {
   private rawClient?: RawOpcuaClient;
   private session?: NodeOpcuaSession;
   private readonly listeners = new Set<(event: OpcUaConnectionLoss) => void>();
@@ -635,10 +767,13 @@ export class NodeOpcuaAdapter implements OpcUaClient {
     const result = await this.discoverRaw(request.endpointUrl);
     return {
       servers: result.servers.map((server) => ({
-        applicationUri: server.applicationUri ?? "",
-        productUri: server.productUri ?? "",
+        applicationUri: boundedString(server.applicationUri ?? ""),
+        productUri: boundedString(server.productUri ?? ""),
         applicationName: server.applicationName ? projectLocalizedText(server.applicationName) : undefined,
-        discoveryUrls: (server.discoveryUrls ?? []).filter((url): url is string => url !== null).slice(0, 32),
+        discoveryUrls: (server.discoveryUrls ?? [])
+          .filter((url): url is string => typeof url === "string")
+          .slice(0, 32)
+          .map(boundedString),
       })),
       endpoints: result.endpoints.map(endpointProjection),
     };
@@ -709,10 +844,6 @@ export class NodeOpcuaAdapter implements OpcUaClient {
     await client?.disconnect().catch(() => undefined);
   }
 
-  get isConnected(): boolean {
-    return Boolean(this.rawClient && this.session);
-  }
-
   private notifyConnectionLoss(event: OpcUaConnectionLoss): void {
     for (const listener of this.listeners) {
       try {
@@ -734,8 +865,7 @@ export class NodeOpcuaAdapter implements OpcUaClient {
       clientCertificateManager: this.options.clientCertificateManager as RawOpcuaClientOptions["clientCertificateManager"],
       ...overrides,
     };
-    const factory = this.options.clientFactory ?? ((options: RawOpcuaClientOptions) => OPCUAClient.create(options));
-    return factory(clientOptions);
+    return OPCUAClient.create(clientOptions);
   }
 
   private async discoverRaw(endpointUrl: string): Promise<{

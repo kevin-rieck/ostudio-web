@@ -83,9 +83,11 @@ function arrayTypeName(arrayType: VariantArrayType): OpcUaVariant["arrayType"] {
 
 function projectVariantValue(variant: Variant): TransportValue {
   if (variant.arrayType !== VariantArrayType.Scalar) {
-    const values = Array.isArray(variant.value) || ArrayBuffer.isView(variant.value)
-      ? Array.from(variant.value as ArrayLike<unknown>)
-      : [];
+    const values = Array.isArray(variant.value)
+      ? variant.value.slice(0, MAX_ARRAY_LENGTH)
+      : ArrayBuffer.isView(variant.value) && !(variant.value instanceof DataView)
+        ? Array.from((variant.value as unknown as { slice(start: number, end: number): ArrayLike<unknown> }).slice(0, MAX_ARRAY_LENGTH))
+        : [];
     return values.map((value) => projectScalar(value, variant.dataType));
   }
   return projectScalar(variant.value, variant.dataType);
@@ -128,7 +130,13 @@ export function projectVariant(variant: Variant): OpcUaVariant {
     arrayType: arrayTypeName(variant.arrayType),
     value: projectVariantValue(variant),
   };
-  if (variant.dimensions?.length) result.dimensions = [...variant.dimensions];
+  if (variant.dimensions?.length) {
+    result.dimensions = variant.dimensions
+      .slice(0, MAX_ARRAY_LENGTH)
+      .map((dimension) => Number.isSafeInteger(dimension) && dimension >= 0
+        ? Math.min(dimension, MAX_ARRAY_LENGTH)
+        : 0);
+  }
   return result;
 }
 
@@ -160,7 +168,7 @@ export function projectDataValue(dataValue: {
 
 export function projectLocalizedText(value: { locale?: string | null; text?: string | null }): OpcUaLocalizedText {
   return {
-    locale: value.locale === null ? undefined : value.locale,
+    locale: value.locale === null || value.locale === undefined ? undefined : boundedString(value.locale),
     text: value.text === null ? undefined : value.text === undefined ? undefined : boundedString(value.text),
   };
 }
@@ -191,8 +199,8 @@ export function projectReference(reference: {
     browseName: projectQualifiedName(reference.browseName),
     displayName: projectLocalizedText(reference.displayName),
     nodeClass: projectNodeClass(reference.nodeClass),
-    referenceTypeId: reference.referenceTypeId?.toString(),
-    typeDefinition: reference.typeDefinition?.toString(),
+    referenceTypeId: reference.referenceTypeId ? boundedString(reference.referenceTypeId.toString()) : undefined,
+    typeDefinition: reference.typeDefinition ? boundedString(reference.typeDefinition.toString()) : undefined,
     isForward: reference.isForward,
   };
 }
