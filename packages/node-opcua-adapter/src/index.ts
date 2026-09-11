@@ -19,6 +19,7 @@ import {
 import type {
   ApplicationDescription,
   Argument,
+  BrowseResult,
   ClientMonitoredItem,
   ClientSession,
   ClientSubscription,
@@ -55,6 +56,7 @@ import type {
   TransportValue,
 } from "@ostudio/application";
 import {
+  boundedString,
   projectDataValue,
   projectLocalizedText,
   projectReference,
@@ -65,12 +67,11 @@ import {
 const DEFAULT_TIMEOUT = 15_000;
 const DEFAULT_METHOD_TIMEOUT = 30_000;
 const DEFAULT_MAX_BROWSE_REQUESTS = 250;
-const DEFAULT_MAX_REFERENCES_PER_NODE = 0;
+const DEFAULT_MAX_REFERENCES_PER_NODE = 1_024;
 const MAX_BROWSE_REQUESTS = 250;
 const MAX_REFERENCES_PER_NODE = 10_000;
 const MAX_VARIANT_ARRAY_LENGTH = 1_024;
 const MAX_VARIANT_DIMENSIONS = 1_024;
-const MAX_STRING_LENGTH = 4_096;
 const VALUE_ATTRIBUTE = AttributeIds.Value;
 const MIN_INT64 = -(1n << 63n);
 const MAX_INT64 = (1n << 63n) - 1n;
@@ -105,10 +106,6 @@ const dataTypeNodeIds: Record<number, OpcUaDataType> = {
 };
 
 class DeadlineExceeded extends Error {}
-
-function boundedString(value: string): string {
-  return value.length <= MAX_STRING_LENGTH ? value : `${value.slice(0, MAX_STRING_LENGTH)}…`;
-}
 
 export class NodeOpcuaAdapterError extends Error {
   constructor(
@@ -151,6 +148,12 @@ function boundedLimit(value: number | undefined, fallback: number, maximum: numb
     throw new NodeOpcuaAdapterError("invalid_request", "The requested operation bound is invalid.");
   }
   return value;
+}
+
+function positiveBoundedLimit(value: number | undefined, fallback: number, maximum: number): number {
+  const limit = boundedLimit(value, fallback, maximum);
+  if (limit < 1) throw new NodeOpcuaAdapterError("invalid_request", "The requested operation bound is invalid.");
+  return limit;
 }
 
 function timeout(options: NodeOpcuaAdapterOptions, key: keyof NodeOpcuaAdapterOptions, fallback: number): number {
@@ -366,17 +369,19 @@ class NodeOpcuaSubscription implements OpcUaSubscription {
     private readonly subscription: ClientSubscription,
     private readonly monitoredItem: ClientMonitoredItem,
     private readonly changed: (value: unknown) => void,
+    private readonly removed: (subscription: NodeOpcuaSubscription) => void,
   ) {}
 
   async unsubscribe(): Promise<void> {
     if (!this.active) return;
-    this.active = false;
-    this.monitoredItem.removeListener("changed", this.changed);
     try {
       await this.subscription.terminate();
     } catch {
       throw new NodeOpcuaAdapterError("operation_failed", "The OPC UA subscription could not be terminated.");
     }
+    this.active = false;
+    this.monitoredItem.removeListener("changed", this.changed);
+    this.removed(this);
   }
 }
 
@@ -394,8 +399,7 @@ class NodeOpcuaSession implements OpcUaSession {
     if (this.closed) throw new NodeOpcuaAdapterError("not_connected", "The OPC UA session is closed.");
   }
 
-  async browse(request: OpcUaBrowseRequest): Promise<OpcUaBrowseResult> {
-    this.ensureOpen();
+  private async withBrowseLock<T>(operation: () => Promise<T>): Promise<T> {
     const previousBrowse = this.browseQueue;
     let release!: () => void;
     this.browseQueue = new Promise<void>((resolve) => {
@@ -403,15 +407,20 @@ class NodeOpcuaSession implements OpcUaSession {
     });
     await previousBrowse;
     try {
-      return await this.browseLocked(request);
+      return await operation();
     } finally {
       release();
     }
   }
 
+  async browse(request: OpcUaBrowseRequest): Promise<OpcUaBrowseResult> {
+    this.ensureOpen();
+    return this.withBrowseLock(() => this.browseLocked(request));
+  }
+
   private async browseLocked(request: OpcUaBrowseRequest): Promise<OpcUaBrowseResult> {
     const maxRequests = boundedLimit(request.maxRequests, this.owner.maxBrowseRequests, MAX_BROWSE_REQUESTS) || 1;
-    const maxReferencesPerNode = boundedLimit(
+    const maxReferencesPerNode = positiveBoundedLimit(
       request.maxReferencesPerNode,
       this.owner.maxReferencesPerNode,
       MAX_REFERENCES_PER_NODE,
@@ -425,27 +434,34 @@ class NodeOpcuaSession implements OpcUaSession {
       ...(request.referenceTypeId ? { referenceTypeId: request.referenceTypeId } : {}),
     };
     const previousLimit = this.session.requestedMaxReferencesPerNode;
-    if (maxReferencesPerNode) this.session.requestedMaxReferencesPerNode = maxReferencesPerNode;
+    this.session.requestedMaxReferencesPerNode = maxReferencesPerNode;
 
     let requests = 0;
-    let result;
+    let result: BrowseResult;
+    let truncated = false;
     const references: OpcUaReference[] = [];
+    const appendReferences = (rawReferences: typeof result.references): void => {
+      const remaining = MAX_REFERENCES_PER_NODE - references.length;
+      references.push(...(rawReferences ?? []).slice(0, remaining).map(projectReference));
+      if ((rawReferences?.length ?? 0) > remaining) truncated = true;
+    };
     try {
       result = await withDeadline(
         this.session.browse(description),
         this.owner.browseTimeout,
       );
       requests += 1;
-      references.push(...(result.references ?? []).map(projectReference));
-      while (result.continuationPoint?.length && requests < maxRequests) {
+      appendReferences(result.references);
+      while (result.continuationPoint?.length && requests < maxRequests && references.length < MAX_REFERENCES_PER_NODE) {
         result = await withDeadline(
           this.session.browseNext(result.continuationPoint, false),
           this.owner.browseTimeout,
         );
         requests += 1;
-        references.push(...(result.references ?? []).map(projectReference));
+        appendReferences(result.references);
       }
       if (result.continuationPoint?.length) {
+        truncated = true;
         await withDeadline(this.session.browseNext(result.continuationPoint, true), this.owner.browseTimeout);
       }
       return {
@@ -453,7 +469,7 @@ class NodeOpcuaSession implements OpcUaSession {
         references,
         status: projectStatusCode(result.statusCode),
         requests,
-        truncated: Boolean(result.continuationPoint?.length),
+        truncated,
       };
     } catch (error) {
       if (error instanceof NodeOpcuaAdapterError) throw error;
@@ -534,7 +550,12 @@ class NodeOpcuaSession implements OpcUaSession {
         }
       };
       monitoredItem.on("changed", changed);
-      const result = new NodeOpcuaSubscription(subscription, monitoredItem, changed);
+      const result = new NodeOpcuaSubscription(
+        subscription,
+        monitoredItem,
+        changed,
+        (terminated) => this.subscriptions.delete(terminated),
+      );
       this.subscriptions.add(result);
       return result;
     } catch (error) {
@@ -626,16 +647,18 @@ class NodeOpcuaSession implements OpcUaSession {
 
   async inspectMethod(methodId: string): Promise<OpcUaMethodDefinition> {
     this.ensureOpen();
-    try {
-      const definition = await withDeadline(this.session.getArgumentDefinition(methodId), this.owner.methodCallTimeout);
-      return {
-        inputArguments: definition.inputArguments.slice(0, MAX_VARIANT_ARRAY_LENGTH).map(argumentProjection),
-        outputArguments: definition.outputArguments.slice(0, MAX_VARIANT_ARRAY_LENGTH).map(argumentProjection),
-      };
-    } catch (error) {
-      if (error instanceof NodeOpcuaAdapterError) throw error;
-      throw new NodeOpcuaAdapterError("operation_failed", "The Method Node metadata could not be read.");
-    }
+    return this.withBrowseLock(async () => {
+      try {
+        const definition = await withDeadline(this.session.getArgumentDefinition(methodId), this.owner.methodCallTimeout);
+        return {
+          inputArguments: definition.inputArguments.slice(0, MAX_VARIANT_ARRAY_LENGTH).map(argumentProjection),
+          outputArguments: definition.outputArguments.slice(0, MAX_VARIANT_ARRAY_LENGTH).map(argumentProjection),
+        };
+      } catch (error) {
+        if (error instanceof NodeOpcuaAdapterError) throw error;
+        throw new NodeOpcuaAdapterError("operation_failed", "The Method Node metadata could not be read.");
+      }
+    });
   }
 
   async call(request: OpcUaCallRequest): Promise<OpcUaCallResult> {
@@ -745,7 +768,7 @@ class NodeOpcuaAdapter implements OpcUaClient {
 
   constructor(private readonly options: NodeOpcuaAdapterOptions) {
     this.maxBrowseRequests = boundedLimit(options.maxBrowseRequests, DEFAULT_MAX_BROWSE_REQUESTS, MAX_BROWSE_REQUESTS) || 1;
-    this.maxReferencesPerNode = boundedLimit(
+    this.maxReferencesPerNode = positiveBoundedLimit(
       options.maxReferencesPerNode,
       DEFAULT_MAX_REFERENCES_PER_NODE,
       MAX_REFERENCES_PER_NODE,

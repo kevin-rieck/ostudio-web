@@ -117,6 +117,14 @@ afterAll(async () => {
 });
 
 describe("production node-opcua adapter", () => {
+  it("rejects an unbounded per-response browse reference override", () => {
+    expect(() => createNodeOpcuaAdapter({
+      applicationName: "OPC UA Studio adapter test",
+      applicationUri: "urn:ostudio:adapter-test",
+      maxReferencesPerNode: 0,
+    })).toThrow();
+  });
+
   it("discovers, connects, browses with a bound, reads, writes, inspects, calls, and disconnects", async () => {
     const discovery = await adapter.discover({ endpointUrl });
     expect(discovery.endpoints.some((endpoint) => endpoint.endpointUrl === endpointUrl && endpoint.securityMode === "None")).toBe(true);
@@ -166,6 +174,26 @@ describe("production node-opcua adapter", () => {
     });
       expect(call.outcome).toBe("succeeded");
       expect(call.outputArguments?.[0]?.value).toBe(5);
+    } finally {
+      await session.close();
+      await adapter.disconnect();
+    }
+  });
+
+  it("serializes Method inspection with bounded browse continuation", async () => {
+    const session = await adapter.connect({ endpointUrl, securityMode: "None" });
+    try {
+      const browsing = session.browse({
+        nodeId: "ns=1;s=AdapterFixture",
+        maxRequests: 10,
+        maxReferencesPerNode: 1,
+      });
+      await Promise.resolve();
+      const inspecting = session.inspectMethod(method.nodeId.toString());
+      const [, definition] = await Promise.all([browsing, inspecting]);
+
+      expect(definition.inputArguments.map((argument) => argument.name)).toEqual(["left", "right"]);
+      expect(definition.outputArguments.map((argument) => argument.name)).toEqual(["sum"]);
     } finally {
       await session.close();
       await adapter.disconnect();

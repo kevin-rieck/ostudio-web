@@ -24,7 +24,7 @@ const MAX_ARRAY_LENGTH = 1_024;
 const MAX_OBJECT_PROPERTIES = 128;
 const MAX_DEPTH = 8;
 
-function boundedString(value: string): string {
+export function boundedString(value: string): string {
   return value.length <= MAX_STRING_LENGTH ? value : `${value.slice(0, MAX_STRING_LENGTH)}…`;
 }
 
