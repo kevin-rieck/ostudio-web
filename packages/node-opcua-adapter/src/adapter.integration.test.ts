@@ -1,44 +1,30 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import {
   DataType,
-  OPCUACertificateManager,
-  OPCUAServer,
   StatusCodes,
   Variant,
+  VariantArrayType,
 } from "node-opcua";
 import type { UAMethod, UAVariable } from "node-opcua-address-space";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { OpcUaClient, OpcUaSubscription } from "@ostudio/application";
 import { createNodeOpcuaAdapter } from "./index";
+import { createOpcUaTestServer, disposeOpcUaTestServer } from "./test-fixture";
 
-let server: OPCUAServer;
-let certificateManager: OPCUACertificateManager;
-let temporaryDirectory: string;
+let server: Awaited<ReturnType<typeof createOpcUaTestServer>>["server"];
 let endpointUrl: string;
 let writableVariable: UAVariable;
+let scalarVariables: Array<{ variable: UAVariable; dataType: DataType; initial: unknown; updated: unknown }>;
 let method: UAMethod;
 let delayedMethod: UAMethod;
 let delayedInvocations = 0;
 let delayedCompletions = 0;
 let adapter: OpcUaClient;
 
+let fixture: Awaited<ReturnType<typeof createOpcUaTestServer>>;
+
 beforeAll(async () => {
-  temporaryDirectory = await mkdtemp(path.join(tmpdir(), "ostudio-adapter-"));
-  certificateManager = new OPCUACertificateManager({
-    rootFolder: path.join(temporaryDirectory, "pki"),
-    automaticallyAcceptUnknownCertificate: true,
-    disableFileWatchers: true,
-  });
-  await certificateManager.initialize();
-  server = new OPCUAServer({
-    port: 0,
-    host: "127.0.0.1",
-    hostname: "127.0.0.1",
-    serverCertificateManager: certificateManager,
-  });
-  await server.initialize();
+  fixture = await createOpcUaTestServer();
+  server = fixture.server;
   const addressSpace = server.engine.addressSpace!;
   const namespace = addressSpace.getOwnNamespace();
   const folder = namespace.addObject({
@@ -66,6 +52,46 @@ beforeAll(async () => {
     nodeId: "ns=1;s=AdapterFixture.Other",
     dataType: DataType.Int32,
     value: new Variant({ dataType: DataType.Int32, value: 2 }),
+  });
+  const scalarFolder = namespace.addObject({
+    organizedBy: addressSpace.rootFolder.objects,
+    browseName: "AdapterScalars",
+    nodeId: "ns=1;s=AdapterScalars",
+  });
+  const scalarCases = [
+    ["Boolean", DataType.Boolean, false, true],
+    ["SByte", DataType.SByte, -128, 127],
+    ["Byte", DataType.Byte, 0, 255],
+    ["Int16", DataType.Int16, -32_768, 32_767],
+    ["UInt16", DataType.UInt16, 0, 65_535],
+    ["Int32", DataType.Int32, -2_147_483_648, 2_147_483_647],
+    ["UInt32", DataType.UInt32, 0, 4_294_967_295],
+    ["Int64", DataType.Int64, "-9223372036854775808", "9223372036854775807"],
+    ["UInt64", DataType.UInt64, "0", "18446744073709551615"],
+    ["Float", DataType.Float, -1.25, 1.25],
+    ["Double", DataType.Double, -9.5, 9.5],
+    ["String", DataType.String, "before", "after"],
+    ["DateTime", DataType.DateTime, new Date("2026-01-02T03:04:05.000Z"), new Date("2027-02-03T04:05:06.000Z")],
+    ["Guid", DataType.Guid, "01234567-89AB-CDEF-0123-456789ABCDEF", "FEDCBA98-7654-3210-FEDC-BA9876543210"],
+    ["ByteString", DataType.ByteString, Buffer.from([1, 2, 3]), Buffer.from([4, 5, 6])],
+    ["XmlElement", DataType.XmlElement, "<before />", "<after />"],
+  ] as const;
+  scalarVariables = scalarCases.map(([name, dataType, initial, updated]) => {
+    let value: unknown = initial;
+    const variable = namespace.addVariable({
+      componentOf: scalarFolder,
+      browseName: name,
+      nodeId: `ns=1;s=AdapterScalars.${name}`,
+      dataType,
+      value: {
+        get: () => new Variant({ dataType, arrayType: VariantArrayType.Scalar, value } as never),
+        set: (next: Variant) => {
+          value = next.value;
+          return StatusCodes.Good;
+        },
+      },
+    });
+    return { variable, dataType, initial, updated };
   });
   method = namespace.addMethod(folder, {
     browseName: "Add",
@@ -99,7 +125,7 @@ beforeAll(async () => {
     }, 250);
   });
   await server.start();
-  endpointUrl = server.getEndpointUrl();
+  endpointUrl = fixture.endpointUrl;
   adapter = createNodeOpcuaAdapter({
     applicationName: "OPC UA Studio adapter test",
     applicationUri: "urn:ostudio:adapter-test",
@@ -111,9 +137,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await adapter?.disconnect().catch(() => undefined);
-  await server?.shutdown().catch(() => undefined);
-  await certificateManager?.dispose().catch(() => undefined);
-  await rm(temporaryDirectory, { recursive: true, force: true });
+  if (fixture) await disposeOpcUaTestServer(fixture);
 });
 
 describe("production node-opcua adapter", () => {
@@ -174,6 +198,29 @@ describe("production node-opcua adapter", () => {
     });
       expect(call.outcome).toBe("succeeded");
       expect(call.outputArguments?.[0]?.value).toBe(5);
+    } finally {
+      await session.close();
+      await adapter.disconnect();
+    }
+  });
+
+  it("reads and writes supported scalar values, including exact 64-bit boundaries", async () => {
+    const session = await adapter.connect({ endpointUrl, securityMode: "None" });
+    try {
+      for (const { variable, dataType, initial, updated } of scalarVariables) {
+        const nodeId = variable.nodeId.toString();
+        const transport = (value: unknown) => dataType === DataType.DateTime && value instanceof Date
+          ? value.toISOString()
+          : dataType === DataType.ByteString && Buffer.isBuffer(value)
+            ? value.toString("base64")
+            : value;
+        await expect(session.read({ nodeId })).resolves.toMatchObject({ dataValue: { value: { value: transport(initial) } } });
+        await expect(session.write({
+          nodeId,
+          value: { dataType: DataType[dataType] as never, arrayType: "Scalar", value: transport(updated) as never },
+        })).resolves.toMatchObject({ outcome: "succeeded" });
+        await expect(session.read({ nodeId })).resolves.toMatchObject({ dataValue: { value: { value: transport(updated) } } });
+      }
     } finally {
       await session.close();
       await adapter.disconnect();

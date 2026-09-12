@@ -138,8 +138,6 @@ export interface OpcUaSubscribeRequest {
   queueSize?: number;
   discardOldest?: boolean;
   publishingInterval?: number;
-  lifetimeCount?: number;
-  maxKeepAliveCount?: number;
 }
 
 export interface OpcUaConnectionLoss {
@@ -157,7 +155,6 @@ export interface OpcUaWriteRequest {
   nodeId: string;
   value: OpcUaVariant;
   attributeId?: number;
-  expectedDataType?: OpcUaDataType;
 }
 
 export type OpcUaMutationOutcome = "succeeded" | "rejected" | "unknown";
@@ -263,19 +260,3 @@ export interface OpcUaClientOptions {
 }
 
 export type OpcUaClientFactory = (options: OpcUaClientOptions) => OpcUaClient;
-
-export const OpcUaAttributeIds = {
-  NodeId: 1,
-  NodeClass: 2,
-  BrowseName: 3,
-  DisplayName: 4,
-  Description: 5,
-  Value: 13,
-  DataType: 14,
-  ValueRank: 15,
-  ArrayDimensions: 16,
-  AccessLevel: 17,
-  UserAccessLevel: 18,
-  Executable: 21,
-  UserExecutable: 22,
-} as const;

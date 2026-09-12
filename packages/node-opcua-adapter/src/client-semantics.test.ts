@@ -1,5 +1,3 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import {
@@ -10,7 +8,6 @@ import {
   MessageSecurityMode,
   OPCUAClient,
   OPCUACertificateManager,
-  OPCUAServer,
   SecurityPolicy,
   StatusCodes,
   TimestampsToReturn,
@@ -25,16 +22,14 @@ import type { EndpointDescription } from "node-opcua-service-endpoints";
 import type { UAObject } from "node-opcua-address-space";
 import type { UAMethod } from "node-opcua-address-space";
 import type { UAVariable } from "node-opcua-address-space";
+import { createOpcUaTestServer, disposeOpcUaTestServer } from "./test-fixture";
+import type { OpcUaTestServer } from "./test-fixture";
 
 const applicationUri = "urn:ostudio:node-opcua-semantics-spike:client";
 const delayedMethodDelay = 250;
 
-type TestServer = {
-  server: OPCUAServer;
-  serverCertificateManager: OPCUACertificateManager;
+type TestServer = OpcUaTestServer & {
   clientCertificateManager: OPCUACertificateManager;
-  temporaryDirectory: string;
-  endpointUrl: string;
   folder: UAObject;
   writableVariable: UAVariable;
   signedVariable: UAVariable;
@@ -153,28 +148,18 @@ async function stopClient(client: OPCUAClient): Promise<void> {
 }
 
 beforeAll(async () => {
-  const temporaryDirectory = await mkdtemp(path.join(tmpdir(), "ostudio-node-opcua-spike-"));
-  const serverCertificateManager = new OPCUACertificateManager({
-    rootFolder: path.join(temporaryDirectory, "server-pki"),
-    automaticallyAcceptUnknownCertificate: true,
-    disableFileWatchers: true,
+  const serverFixture = await createOpcUaTestServer({
+    securityPolicies: [SecurityPolicy.None, SecurityPolicy.Basic256Sha256],
+    securityModes: [MessageSecurityMode.None, MessageSecurityMode.SignAndEncrypt],
   });
   const clientCertificateManager = new OPCUACertificateManager({
-    rootFolder: path.join(temporaryDirectory, "client-pki"),
+    rootFolder: path.join(serverFixture.temporaryDirectory, "client-pki"),
     automaticallyAcceptUnknownCertificate: true,
     disableFileWatchers: true,
   });
-  const resources: {
-    server?: OPCUAServer;
-    serverCertificateManager: OPCUACertificateManager;
-    clientCertificateManager: OPCUACertificateManager;
-    temporaryDirectory: string;
-  } = { serverCertificateManager, clientCertificateManager, temporaryDirectory };
   cleanup = async () => {
-    await resources.server?.shutdown().catch(() => undefined);
-    await resources.serverCertificateManager.dispose().catch(() => undefined);
-    await resources.clientCertificateManager.dispose().catch(() => undefined);
-    await rm(resources.temporaryDirectory, { recursive: true, force: true });
+    await clientCertificateManager.dispose().catch(() => undefined);
+    await disposeOpcUaTestServer(serverFixture);
   };
   await clientCertificateManager.initialize();
   await clientCertificateManager.createSelfSignedCertificate({
@@ -186,17 +171,7 @@ beforeAll(async () => {
     outputFile: path.join(clientCertificateManager.ownCertFolder, "client_certificate.pem"),
   });
 
-  const server = new OPCUAServer({
-    port: 0,
-    host: "127.0.0.1",
-    hostname: "127.0.0.1",
-    securityPolicies: [SecurityPolicy.None, SecurityPolicy.Basic256Sha256],
-    securityModes: [MessageSecurityMode.None, MessageSecurityMode.SignAndEncrypt],
-    serverCertificateManager,
-  });
-  resources.server = server;
-  await server.initialize();
-
+  const server = serverFixture.server;
   const addressSpace = server.engine.addressSpace;
   if (!addressSpace) {
     throw new Error("The in-process server did not initialize an address space");
@@ -297,11 +272,8 @@ beforeAll(async () => {
 
   await server.start();
   fixture = {
-    server,
-    serverCertificateManager,
+    ...serverFixture,
     clientCertificateManager,
-    temporaryDirectory,
-    endpointUrl: server.getEndpointUrl(),
     folder,
     writableVariable,
     signedVariable,

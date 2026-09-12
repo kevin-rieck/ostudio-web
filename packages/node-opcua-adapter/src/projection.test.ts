@@ -15,20 +15,6 @@ import {
 } from "./projection";
 
 describe("node-opcua transport projection", () => {
-  it("keeps signed and unsigned 64-bit values as canonical decimal strings", () => {
-    const signed = projectVariant(
-      new Variant({ dataType: DataType.Int64, value: "-9223372036854775808" }),
-    );
-    const unsigned = projectVariant(
-      new Variant({ dataType: DataType.UInt64, value: "18446744073709551615" }),
-    );
-
-    expect(signed.value).toBe("-9223372036854775808");
-    expect(unsigned.value).toBe("18446744073709551615");
-    expect(typeof signed.value).toBe("string");
-    expect(typeof unsigned.value).toBe("string");
-  });
-
   it.each([
     [DataType.Null, null, null],
     [DataType.Boolean, true, true],
@@ -83,13 +69,36 @@ describe("node-opcua transport projection", () => {
     expect(variant.dimensions).toHaveLength(1_024);
   });
 
+  it("bounds nested values with depth, cycles, and one shared budget", () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    expect(projectVariant({ dataType: DataType.ExtensionObject, arrayType: 0, value: cyclic } as unknown as Variant).value).toEqual({
+      self: "[object omitted: cycle]",
+    });
+
+    let nested: unknown = "leaf";
+    for (let index = 0; index < 9; index += 1) nested = [nested];
+    expect(JSON.stringify(projectVariant({ dataType: DataType.ExtensionObject, arrayType: 0, value: nested } as unknown as Variant).value)).toContain(
+      "[object omitted: depth limit]",
+    );
+
+    const projected = projectVariant({
+      dataType: DataType.ExtensionObject,
+      arrayType: 1,
+      value: Array.from({ length: 1_024 }, () => ({ first: 1, second: 2, third: 3, fourth: 4, fifth: 5 })),
+    } as unknown as Variant);
+    expect(Array.isArray(projected.value)).toBe(true);
+    expect((projected.value as unknown[]).length).toBeLessThan(1_024);
+    expect(JSON.stringify(projected.value)).toContain("_truncated");
+  });
+
   it("bounds projected discovery strings and reference identifiers", () => {
     const oversized = "x".repeat(5_000);
     expect(projectLocalizedText({ locale: oversized, text: oversized })).toEqual({
       locale: `${"x".repeat(4_096)}…`,
       text: `${"x".repeat(4_096)}…`,
     });
-    expect(projectReference({
+    const reference = projectReference({
       nodeId: { toString: () => "ns=1;s=node" },
       browseName: { namespaceIndex: 1, name: "browse" },
       displayName: { text: "display" },
@@ -97,16 +106,9 @@ describe("node-opcua transport projection", () => {
       referenceTypeId: { toString: () => oversized },
       typeDefinition: { toString: () => oversized },
       isForward: true,
-    }).referenceTypeId).toBe(`${"x".repeat(4_096)}…`);
-    expect(projectReference({
-      nodeId: { toString: () => "ns=1;s=node" },
-      browseName: { namespaceIndex: 1, name: "browse" },
-      displayName: { text: "display" },
-      nodeClass: 2,
-      referenceTypeId: { toString: () => "reference" },
-      typeDefinition: { toString: () => oversized },
-      isForward: true,
-    }).typeDefinition).toBe(`${"x".repeat(4_096)}…`);
+    });
+    expect(reference.referenceTypeId).toBe(`${"x".repeat(4_096)}…`);
+    expect(reference.typeDefinition).toBe(`${"x".repeat(4_096)}…`);
   });
 
   it("projects structured OPC UA values without exposing library objects", () => {

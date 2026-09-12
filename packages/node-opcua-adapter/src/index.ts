@@ -142,6 +142,18 @@ function withDeadline<T>(operation: Promise<T>, milliseconds: number): Promise<T
   });
 }
 
+function operationDeadline(milliseconds: number): number {
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0) {
+    throw new NodeOpcuaAdapterError("invalid_request", "The operation deadline is invalid.");
+  }
+  return Date.now() + milliseconds;
+}
+
+function withDeadlineAt<T>(operation: Promise<T>, deadline: number): Promise<T> {
+  const remaining = deadline - Date.now();
+  return remaining > 0 ? withDeadline(operation, remaining) : Promise.reject(new DeadlineExceeded());
+}
+
 function boundedLimit(value: number | undefined, fallback: number, maximum: number): number {
   if (value === undefined) return fallback;
   if (!Number.isInteger(value) || value < 0 || value > maximum) {
@@ -184,12 +196,8 @@ function endpointProjection(endpoint: EndpointDescription): OpcUaEndpoint {
   };
 }
 
-function asErrorCode(error: unknown): "timeout" | "connection_lost" {
-  return error instanceof DeadlineExceeded ? "timeout" : "connection_lost";
-}
-
 function mutationFailure(error: unknown): OpcUaMutationResult {
-  const code = asErrorCode(error);
+  const code = error instanceof DeadlineExceeded ? "timeout" : "connection_lost";
   return {
     outcome: "unknown",
     error: {
@@ -206,15 +214,6 @@ function mutationResult(statusCode: { name: string; value: number; isGood(): boo
     : { outcome: "rejected", status, error: { code: "server_rejected", message: "The OPC UA Server rejected the operation." } };
 }
 
-function methodMutationResult(
-  statusCode: { name: string; value: number; isGood(): boolean },
-  outputArguments: OpcUaVariant[] | undefined,
-): OpcUaCallResult {
-  return {
-    ...mutationResult(statusCode),
-    outputArguments,
-  };
-}
 
 function nodeIdDataType(value: unknown): OpcUaDataType | string | undefined {
   const text = String(value);
@@ -515,8 +514,8 @@ class NodeOpcuaSession implements OpcUaSession {
       const subscription = await withDeadline(
         this.session.createSubscription2({
           requestedPublishingInterval: request.publishingInterval ?? 1_000,
-          requestedLifetimeCount: request.lifetimeCount ?? 6_000,
-          requestedMaxKeepAliveCount: request.maxKeepAliveCount ?? 10,
+          requestedLifetimeCount: 6_000,
+          requestedMaxKeepAliveCount: 10,
           publishingEnabled: true,
         }),
         this.owner.readTimeout,
@@ -574,8 +573,10 @@ class NodeOpcuaSession implements OpcUaSession {
     }
 
     let metadata;
+    let deadline: number;
     try {
-      metadata = await withDeadline(
+      deadline = operationDeadline(this.owner.writeTimeout);
+      metadata = await withDeadlineAt(
         this.session.read([
           { nodeId: request.nodeId, attributeId: AttributeIds.NodeClass },
           { nodeId: request.nodeId, attributeId: AttributeIds.DataType },
@@ -584,7 +585,7 @@ class NodeOpcuaSession implements OpcUaSession {
           { nodeId: request.nodeId, attributeId: AttributeIds.AccessLevel },
           { nodeId: request.nodeId, attributeId: AttributeIds.UserAccessLevel },
         ]),
-        this.owner.writeTimeout,
+        deadline,
       );
     } catch {
       return {
@@ -618,23 +619,16 @@ class NodeOpcuaSession implements OpcUaSession {
         error: { code: "invalid_metadata", message: "Variable Node metadata does not permit this write." },
       };
     }
-    if (request.expectedDataType && request.expectedDataType !== dataType) {
-      return {
-        outcome: "rejected",
-        error: { code: "invalid_metadata", message: "Variable Node data type changed before the write." },
-      };
-    }
-
     let statusCode;
     try {
       const input = variantInput(request.value);
-      statusCode = await withDeadline(
+      statusCode = await withDeadlineAt(
         this.session.write({
           nodeId: request.nodeId,
           attributeId: request.attributeId ?? VALUE_ATTRIBUTE,
           value: { value: input },
         }),
-        this.owner.writeTimeout,
+        deadline,
       );
     } catch (error) {
       if (error instanceof NodeOpcuaAdapterError) {
@@ -645,11 +639,10 @@ class NodeOpcuaSession implements OpcUaSession {
     return mutationResult(statusCode);
   }
 
-  async inspectMethod(methodId: string): Promise<OpcUaMethodDefinition> {
-    this.ensureOpen();
+  private inspectMethodAt(methodId: string, deadline: number): Promise<OpcUaMethodDefinition> {
     return this.withBrowseLock(async () => {
       try {
-        const definition = await withDeadline(this.session.getArgumentDefinition(methodId), this.owner.methodCallTimeout);
+        const definition = await withDeadlineAt(this.session.getArgumentDefinition(methodId), deadline);
         return {
           inputArguments: definition.inputArguments.slice(0, MAX_VARIANT_ARRAY_LENGTH).map(argumentProjection),
           outputArguments: definition.outputArguments.slice(0, MAX_VARIANT_ARRAY_LENGTH).map(argumentProjection),
@@ -661,17 +654,24 @@ class NodeOpcuaSession implements OpcUaSession {
     });
   }
 
+  async inspectMethod(methodId: string): Promise<OpcUaMethodDefinition> {
+    this.ensureOpen();
+    return this.inspectMethodAt(methodId, operationDeadline(this.owner.methodCallTimeout));
+  }
+
   async call(request: OpcUaCallRequest): Promise<OpcUaCallResult> {
     this.ensureOpen();
     let definition: OpcUaMethodDefinition;
+    let deadline: number;
     try {
-      definition = await this.inspectMethod(request.methodId);
-      const executable = await withDeadline(
+      deadline = operationDeadline(this.owner.methodCallTimeout);
+      definition = await this.inspectMethodAt(request.methodId, deadline);
+      const executable = await withDeadlineAt(
         this.session.read([
           { nodeId: request.methodId, attributeId: AttributeIds.Executable },
           { nodeId: request.methodId, attributeId: AttributeIds.UserExecutable },
         ]),
-        this.owner.methodCallTimeout,
+        deadline,
       );
       if (
         executable.length !== 2
@@ -722,18 +722,18 @@ class NodeOpcuaSession implements OpcUaSession {
     }
 
     try {
-      const result = await withDeadline(
+      const result = await withDeadlineAt(
         this.session.call({
           objectId: request.objectId,
           methodId: request.methodId,
           inputArguments,
         }),
-        this.owner.methodCallTimeout,
+        deadline,
       );
-      return methodMutationResult(
-        result.statusCode,
-        result.outputArguments?.map(projectVariant),
-      );
+      return {
+        ...mutationResult(result.statusCode),
+        outputArguments: result.outputArguments?.map(projectVariant),
+      };
     } catch (error) {
       return mutationFailure(error);
     }
