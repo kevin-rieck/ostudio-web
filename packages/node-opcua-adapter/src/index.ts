@@ -77,34 +77,6 @@ const MIN_INT64 = -(1n << 63n);
 const MAX_INT64 = (1n << 63n) - 1n;
 const MAX_UINT64 = (1n << 64n) - 1n;
 
-const dataTypeNodeIds: Record<number, OpcUaDataType> = {
-  1: "Boolean",
-  2: "SByte",
-  3: "Byte",
-  4: "Int16",
-  5: "UInt16",
-  6: "Int32",
-  7: "UInt32",
-  8: "Int64",
-  9: "UInt64",
-  10: "Float",
-  11: "Double",
-  12: "String",
-  13: "DateTime",
-  14: "Guid",
-  15: "ByteString",
-  16: "XmlElement",
-  17: "NodeId",
-  18: "ExpandedNodeId",
-  19: "StatusCode",
-  20: "QualifiedName",
-  21: "LocalizedText",
-  22: "ExtensionObject",
-  23: "DataValue",
-  24: "Variant",
-  25: "DiagnosticInfo",
-};
-
 class DeadlineExceeded extends Error {}
 
 export class NodeOpcuaAdapterError extends Error {
@@ -218,7 +190,10 @@ function mutationResult(statusCode: { name: string; value: number; isGood(): boo
 function nodeIdDataType(value: unknown): OpcUaDataType | string | undefined {
   const text = String(value);
   const match = /^ns=0;i=(\d+)$/.exec(text);
-  return match ? dataTypeNodeIds[Number(match[1])] : boundedString(text) || undefined;
+  if (!match) return boundedString(text) || undefined;
+  const numericId = Number(match[1]);
+  const dataType = DataType[numericId];
+  return numericId !== DataType.Null && typeof dataType === "string" ? dataType as OpcUaDataType : undefined;
 }
 
 function dimensions(value: unknown): number[] | null | undefined {

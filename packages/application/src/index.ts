@@ -699,6 +699,26 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
     }), "search-changed");
   };
 
+  const teardown = async (clearBrowseTimer = false): Promise<void> => {
+    if (clearBrowseTimer) {
+      if (shallowBrowseTimer !== undefined) timers.clearTimeout(shallowBrowseTimer);
+      shallowBrowseTimer = undefined;
+      shallowBrowseTimerResolve?.();
+      shallowBrowseTimerResolve = undefined;
+    }
+    unsubscribeConnectionLoss?.();
+    unsubscribeConnectionLoss = undefined;
+    session = undefined;
+    try {
+      await unsubscribeAll();
+      await client.disconnect();
+    } finally {
+      resetSessionState();
+      update((current) => ({ ...current, connection: { state: "disconnected", connectionGeneration: current.connection.connectionGeneration } }), "connection-changed");
+      markSafety(true);
+    }
+  };
+
   const connectionLost = (generation: number, lostSession: OpcUaSession): void => {
     if (state.connection.connectionGeneration !== generation || session !== lostSession) return;
     session = undefined;
@@ -783,19 +803,7 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
         throw error;
       }
     }),
-    disconnect: () => serialized(async () => {
-      session = undefined;
-      unsubscribeConnectionLoss?.();
-      unsubscribeConnectionLoss = undefined;
-      try {
-        await unsubscribeAll();
-        await client.disconnect();
-      } finally {
-        resetSessionState();
-        update((current) => ({ ...current, connection: { state: "disconnected", connectionGeneration: current.connection.connectionGeneration } }), "connection-changed");
-        markSafety(true);
-      }
-    }),
+    disconnect: () => serialized(() => teardown()),
     setReadOnly: (readOnly, confirmation) => serialized(async () => {
       if (!readOnly && confirmation !== true && confirmation !== "DISABLE_READ_ONLY") throw new ApplicationError("confirmation_required", "Disabling Read-Only Mode requires confirmation.");
       if (!readOnly && !session) throw new ApplicationError("connection_required", "An OPC UA connection is required.");
@@ -905,23 +913,7 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
     },
     getTrend: (nodeId) => [...(trendPoints.get(nodeId) ?? [])],
     inspectMethod: (methodId) => requireSession().inspectMethod(methodId),
-    close: () => serialized(async () => {
-      if (shallowBrowseTimer !== undefined) timers.clearTimeout(shallowBrowseTimer);
-      shallowBrowseTimer = undefined;
-      shallowBrowseTimerResolve?.();
-      shallowBrowseTimerResolve = undefined;
-      unsubscribeConnectionLoss?.();
-      unsubscribeConnectionLoss = undefined;
-      session = undefined;
-      try {
-        await unsubscribeAll();
-        await client.disconnect();
-      } finally {
-        resetSessionState();
-        update((current) => ({ ...current, connection: { state: "disconnected", connectionGeneration: current.connection.connectionGeneration } }), "connection-changed");
-        markSafety(true);
-      }
-    }),
+    close: () => serialized(() => teardown(true)),
   };
   return facade;
 }
