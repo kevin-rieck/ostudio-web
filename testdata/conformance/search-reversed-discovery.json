@@ -1,0 +1,20 @@
+{
+  "fixtureVersion": "1.0.0",
+  "id": "search-reversed-discovery-v1",
+  "applicableTargets": ["web"],
+  "kind": "search-ordering",
+  "description": "Repeated discovery of one Address Space node keeps explicit membership and its shortest distance.",
+  "query": "pressure",
+  "arrivals": [
+    { "nodeId": "ns=2;s=shared", "displayName": "pressure sensor", "explicitBrowse": false, "distance": 5 },
+    { "nodeId": "ns=2;s=shared", "browseName": "pressure", "explicitBrowse": true, "distance": 2 }
+  ],
+  "reversedArrivals": [
+    { "nodeId": "ns=2;s=shared", "browseName": "pressure", "explicitBrowse": true, "distance": 2 },
+    { "nodeId": "ns=2;s=shared", "displayName": "pressure sensor", "explicitBrowse": false, "distance": 5 }
+  ],
+  "candidates": [
+    { "nodeId": "ns=2;s=shared", "explicitBrowse": true, "distance": 2 }
+  ],
+  "orderedNodeIds": ["ns=2;s=shared"]
+}

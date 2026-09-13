@@ -315,6 +315,14 @@ export interface SafetySnapshot {
   safetyGeneration: number;
 }
 
+export type ReadOnlyConfirmation = true | "DISABLE_READ_ONLY";
+
+export interface DiagnosticRecord {
+  code: "connection_failed" | "connection_lost";
+  endpoint?: string;
+  outcome: "unknown";
+}
+
 export interface VariableNodeMetadata {
   nodeId: string;
   browseName?: OpcUaQualifiedName;
@@ -370,6 +378,7 @@ export interface ApplicationSnapshot {
   inspections: Record<string, VariableNodeInspection>;
   trends: Record<string, TrendPoint[]>;
   search: SearchSnapshot;
+  diagnostics: DiagnosticRecord[];
 }
 
 type ApplicationEventType =
@@ -378,7 +387,8 @@ type ApplicationEventType =
   | "inspection-changed"
   | "watchlist-changed"
   | "trend-changed"
-  | "search-changed";
+  | "search-changed"
+  | "diagnostic-changed";
 
 export interface ApplicationEvent {
   type: ApplicationEventType;
@@ -410,7 +420,7 @@ export interface ApplicationFacade {
   discover(request: OpcUaDiscoveryRequest): Promise<OpcUaDiscoveryResult>;
   connect(request: OpcUaConnectRequest): Promise<void>;
   disconnect(): Promise<void>;
-  setReadOnly(readOnly: boolean, confirmation?: boolean | string): Promise<void>;
+  setReadOnly(readOnly: boolean, confirmation?: ReadOnlyConfirmation): Promise<void>;
   browse(request: OpcUaBrowseRequest): Promise<OpcUaBrowseResult>;
   read(request: OpcUaReadRequest | OpcUaReadRequest[]): Promise<OpcUaReadResult | OpcUaReadResult[]>;
   search(query: string, candidates?: SearchCandidate[]): Promise<SearchSnapshot>;
@@ -448,6 +458,29 @@ function freeze<T>(value: T): Readonly<T> {
   return value as Readonly<T>;
 }
 
+function safeDiagnosticEndpoint(endpoint: string): string | undefined {
+  try {
+    const parsed = new URL(endpoint);
+    parsed.username = "";
+    parsed.password = "";
+    return `${parsed.protocol}//${parsed.host}`.slice(0, 256);
+  } catch {
+    return undefined;
+  }
+}
+
+function safeEndpoint(endpoint: string): string {
+  try {
+    const parsed = new URL(endpoint);
+    parsed.username = "";
+    parsed.password = "";
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    if (endpoint.includes("@")) throw new ApplicationError("invalid_request", "The endpoint URL must not contain userinfo.");
+    return endpoint;
+  }
+}
+
 function safeConnection(connection: SavedConnection, logger?: Logger): SavedConnection {
   const certificateReference = connection.clientCertificateReference;
   const safeReference = certificateReference === undefined || /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(certificateReference)
@@ -457,7 +490,7 @@ function safeConnection(connection: SavedConnection, logger?: Logger): SavedConn
   return {
     id: connection.id,
     name: connection.name,
-    endpoint: connection.endpoint,
+    endpoint: safeEndpoint(connection.endpoint),
     securityPolicy: connection.securityPolicy,
     securityMode: connection.securityMode,
     ...(connection.username === undefined ? {} : { username: connection.username }),
@@ -493,6 +526,17 @@ function compareCodePoints(left: string, right: string): number {
     if (leftPoint !== rightPoint) return leftPoint - rightPoint;
   }
   return leftPoints.length - rightPoints.length;
+}
+
+function indexSearchCandidate(index: Map<string, SearchCandidate>, candidate: SearchCandidate): void {
+  const existing = index.get(candidate.nodeId);
+  const distances = [existing?.distance, candidate.distance].filter((distance): distance is number => distance !== undefined);
+  index.set(candidate.nodeId, {
+    ...existing,
+    ...candidate,
+    ...(existing?.explicitBrowse === true || candidate.explicitBrowse === true ? { explicitBrowse: true } : {}),
+    ...(distances.length > 0 ? { distance: Math.min(...distances) } : {}),
+  });
 }
 
 function rankSearch(candidates: SearchCandidate[], query: string): SearchResult[] {
@@ -560,6 +604,7 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
     inspections: {},
     trends: {},
     search: { results: [], coverage: "complete", requests: 0, budget: config.shallowBrowseRequestBudget },
+    diagnostics: [],
   });
   let transition = Promise.resolve();
   const indexed = new Map<string, SearchCandidate>();
@@ -567,6 +612,7 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
   const trendPoints = new Map<string, TrendPoint[]>();
   let browseRequests = 0;
   const shallowBrowseQueue: string[] = [];
+  const shallowBrowseDistances = new Map<string, number>();
   const queuedShallowBrowseNodes = new Set<string>();
   const visitedShallowBrowseNodes = new Set<string>();
   let shallowBrowseTimer: unknown;
@@ -576,15 +622,21 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
   let activeSafeReads = 0;
   const waitingSafeReads: Array<() => void> = [];
   const isCurrentSession = (expected: OpcUaSession, generation: number): boolean => session === expected && state.connection.connectionGeneration === generation;
+  const releaseSafeReadWaiter = (): void => {
+    waitingSafeReads.shift()?.();
+  };
   const safeRead = async <T>(expected: OpcUaSession, generation: number, operation: () => Promise<T>): Promise<T> => {
     if (activeSafeReads >= config.maxSafeReadConcurrency) await new Promise<void>((resolve) => waitingSafeReads.push(resolve));
-    if (!isCurrentSession(expected, generation)) throw new ApplicationError("connection_required", "An OPC UA connection is required.");
+    if (!isCurrentSession(expected, generation)) {
+      releaseSafeReadWaiter();
+      throw new ApplicationError("connection_required", "An OPC UA connection is required.");
+    }
     activeSafeReads += 1;
     try {
       return await operation();
     } finally {
       activeSafeReads -= 1;
-      waitingSafeReads.shift()?.();
+      releaseSafeReadWaiter();
     }
   };
 
@@ -595,6 +647,11 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
   const update = (change: (current: ApplicationSnapshot) => ApplicationSnapshot, type: ApplicationEventType): void => {
     state = freeze(change(state));
     publish(type);
+  };
+  const recordDiagnostic = (record: DiagnosticRecord): void => {
+    const safeRecord = { ...record };
+    update((current) => ({ ...current, diagnostics: [...current.diagnostics, safeRecord].slice(-100) }), "diagnostic-changed");
+    dependencies.logger?.info?.("OPC UA diagnostic.", safeRecord);
   };
   const serialized = <T>(operation: () => Promise<T>): Promise<T> => {
     const result = transition.then(operation, operation);
@@ -620,9 +677,11 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
     trendPoints.clear();
     shallowBrowseQueue.length = 0;
     queuedShallowBrowseNodes.clear();
+    shallowBrowseDistances.clear();
     visitedShallowBrowseNodes.clear();
     if (seedBrowseQueue) {
       shallowBrowseQueue.push("i=85");
+      shallowBrowseDistances.set("i=85", 0);
       queuedShallowBrowseNodes.add("i=85");
     }
     browseRequests = 0;
@@ -642,19 +701,18 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
 
   const connectionLost = (generation: number, lostSession: OpcUaSession): void => {
     if (state.connection.connectionGeneration !== generation || session !== lostSession) return;
-    void serialized(async () => {
-      if (state.connection.connectionGeneration !== generation || session !== lostSession) return;
-      session = undefined;
-      unsubscribeConnectionLoss?.();
-      unsubscribeConnectionLoss = undefined;
-      await unsubscribeAll();
-      update((current) => ({
-        ...current,
-        connection: { ...current.connection, state: "connection-lost", error: "The OPC UA connection was lost." },
-        inspections: Object.fromEntries(Object.entries(current.inspections).map(([nodeId, inspection]) => [nodeId, { ...inspection, stale: true }])),
-      }), "connection-changed");
-      markSafety(true);
-    });
+    session = undefined;
+    unsubscribeConnectionLoss?.();
+    unsubscribeConnectionLoss = undefined;
+    update((current) => ({
+      ...current,
+      connection: { ...current.connection, state: "connection-lost", error: "The OPC UA connection was lost." },
+      safety: { readOnly: true, safetyGeneration: current.safety.safetyGeneration + 1 },
+      inspections: Object.fromEntries(Object.entries(current.inspections).map(([nodeId, inspection]) => [nodeId, { ...inspection, stale: true }])),
+    }), "connection-changed");
+    publish("safety-changed");
+    recordDiagnostic({ code: "connection_lost", endpoint: state.connection.endpointUrl && safeDiagnosticEndpoint(state.connection.endpointUrl), outcome: "unknown" });
+    void serialized(() => unsubscribeAll());
   };
 
   const shallowBrowse = async (): Promise<void> => {
@@ -667,6 +725,7 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
     const currentSession = session;
     const generation = state.connection.connectionGeneration;
     const nodeId = shallowBrowseQueue.shift()!;
+    const distance = shallowBrowseDistances.get(nodeId) ?? 0;
     queuedShallowBrowseNodes.delete(nodeId);
     visitedShallowBrowseNodes.add(nodeId);
     browseRequests += 1;
@@ -675,15 +734,17 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
     if (session !== currentSession || state.connection.connectionGeneration !== generation) return;
     lastShallowBrowseAt = dependencies.clock.now().getTime();
     for (const reference of result.references) {
-      indexed.set(reference.nodeId, {
+      indexSearchCandidate(indexed, {
         nodeId: reference.nodeId,
         browseName: reference.browseName.name,
         displayName: reference.displayName.text,
         explicitBrowse: false,
+        distance: distance + 1,
       });
       const browseable = reference.isForward && ["Object", "ObjectType", "VariableType", "View"].includes(reference.nodeClass);
       if (browseable && !visitedShallowBrowseNodes.has(reference.nodeId) && !queuedShallowBrowseNodes.has(reference.nodeId)) {
         shallowBrowseQueue.push(reference.nodeId);
+        shallowBrowseDistances.set(reference.nodeId, distance + 1);
         queuedShallowBrowseNodes.add(reference.nodeId);
       }
     }
@@ -704,7 +765,8 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
     discover: (request) => client.discover(request),
     connect: (request) => serialized(async () => {
       if (session) throw new ApplicationError("invalid_request", "An OPC UA session is already connected.");
-      update((current) => ({ ...current, connection: { ...current.connection, state: "connecting", endpointUrl: request.endpointUrl } }), "connection-changed");
+      const safeEndpointUrl = safeEndpoint(request.endpointUrl);
+      update((current) => ({ ...current, connection: { ...current.connection, state: "connecting", endpointUrl: safeEndpointUrl } }), "connection-changed");
       try {
         session = await client.connect(request);
         resetSessionState(true);
@@ -712,11 +774,12 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
         const connectedSession = session;
         unsubscribeConnectionLoss?.();
         unsubscribeConnectionLoss = client.onConnectionLost(() => connectionLost(generation, connectedSession));
-        update((current) => ({ ...current, connection: { state: "connected", endpointUrl: request.endpointUrl, connectionGeneration: generation } }), "connection-changed");
+        update((current) => ({ ...current, connection: { state: "connected", endpointUrl: safeEndpointUrl, connectionGeneration: generation } }), "connection-changed");
         markSafety(true);
       } catch (error) {
         dependencies.logger?.error?.("OPC UA connection failed.", { code: "connection_failed" });
         update((current) => ({ ...current, connection: { ...current.connection, state: "disconnected", error: "Connection failed." } }), "connection-changed");
+        recordDiagnostic({ code: "connection_failed", endpoint: safeDiagnosticEndpoint(request.endpointUrl), outcome: "unknown" });
         throw error;
       }
     }),
@@ -743,8 +806,9 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
       const generation = state.connection.connectionGeneration;
       const result = await currentSession.browse(request);
       if (session !== currentSession || state.connection.connectionGeneration !== generation) return result;
+      const distance = (shallowBrowseDistances.get(request.nodeId) ?? indexed.get(request.nodeId)?.distance ?? 0) + 1;
       for (const reference of result.references) {
-        indexed.set(reference.nodeId, { nodeId: reference.nodeId, browseName: reference.browseName.name, displayName: reference.displayName.text, explicitBrowse: true });
+        indexSearchCandidate(indexed, { nodeId: reference.nodeId, browseName: reference.browseName.name, displayName: reference.displayName.text, explicitBrowse: true, distance });
       }
       return result;
     }),
@@ -754,12 +818,13 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
       return safeRead<OpcUaReadResult | OpcUaReadResult[]>(currentSession, generation, () => Array.isArray(request) ? currentSession.read(request) : currentSession.read(request));
     },
     search: async (query, candidates = []) => {
-      for (const candidate of candidates) indexed.set(candidate.nodeId, { ...candidate, explicitBrowse: candidate.explicitBrowse ?? true });
-      const results = rankSearch([...indexed.values()], query);
+      for (const candidate of candidates) indexSearchCandidate(indexed, { ...candidate, explicitBrowse: candidate.explicitBrowse ?? true });
       const incompleteCoverage = state.search.coverage === "incomplete" || [...indexed.values()].some((candidate) => candidate.explicitBrowse !== true);
       const searchSession = session;
       const searchGeneration = state.connection.connectionGeneration;
-      if (!results.length && session && browseRequests < config.shallowBrowseRequestBudget) {
+      const hasPendingBrowse = session !== undefined && browseRequests < config.shallowBrowseRequestBudget && shallowBrowseQueue.length > 0;
+      if (hasPendingBrowse) {
+        update((current) => ({ ...current, search: { ...current.search, coverage: "incomplete" } }), "search-changed");
         const elapsed = lastShallowBrowseAt === undefined ? config.shallowBrowseIntervalMilliseconds : dependencies.clock.now().getTime() - lastShallowBrowseAt;
         if (elapsed >= config.shallowBrowseIntervalMilliseconds) {
           await serializedShallowBrowse();
@@ -781,7 +846,12 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
         }
       }
       if (session !== searchSession || state.connection.connectionGeneration !== searchGeneration) return state.search;
-      const search = { ...state.search, results: rankSearch([...indexed.values()], query), coverage: incompleteCoverage ? "incomplete" as const : state.search.coverage, requests: browseRequests };
+      const search = {
+        ...state.search,
+        results: rankSearch([...indexed.values()], query),
+        coverage: incompleteCoverage || state.search.coverage === "incomplete" || (session !== undefined && shallowBrowseQueue.length > 0) ? "incomplete" as const : state.search.coverage,
+        requests: browseRequests,
+      };
       update((current) => ({ ...current, search }), "search-changed");
       return search;
     },
