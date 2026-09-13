@@ -516,6 +516,11 @@ function valueAsNumber(value: OpcUaVariant | undefined): number | undefined {
   return value.value;
 }
 
+function isOutOfRange(value: OpcUaVariant | undefined, range: VariableNodeMetadata["range"]): boolean {
+  const numeric = valueAsNumber(value);
+  return numeric !== undefined && ((range?.low !== undefined && numeric < range.low) || (range?.high !== undefined && numeric > range.high));
+}
+
 export function createApplication(dependencies: ApplicationDependencies): ApplicationFacade {
   const config = {
     ...DEFAULT_CONFIG,
@@ -561,14 +566,19 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
   const subscriptions = new Map<string, OpcUaSubscription>();
   const trendPoints = new Map<string, TrendPoint[]>();
   let browseRequests = 0;
+  const shallowBrowseQueue: string[] = [];
+  const queuedShallowBrowseNodes = new Set<string>();
+  const visitedShallowBrowseNodes = new Set<string>();
   let shallowBrowseTimer: unknown;
   let shallowBrowseTimerResolve: (() => void) | undefined;
   let shallowBrowseTransition = Promise.resolve();
   let lastShallowBrowseAt: number | undefined;
   let activeSafeReads = 0;
   const waitingSafeReads: Array<() => void> = [];
-  const safeRead = async <T>(operation: () => Promise<T>): Promise<T> => {
+  const isCurrentSession = (expected: OpcUaSession, generation: number): boolean => session === expected && state.connection.connectionGeneration === generation;
+  const safeRead = async <T>(expected: OpcUaSession, generation: number, operation: () => Promise<T>): Promise<T> => {
     if (activeSafeReads >= config.maxSafeReadConcurrency) await new Promise<void>((resolve) => waitingSafeReads.push(resolve));
+    if (!isCurrentSession(expected, generation)) throw new ApplicationError("connection_required", "An OPC UA connection is required.");
     activeSafeReads += 1;
     try {
       return await operation();
@@ -598,10 +608,23 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
   const markSafety = (readOnly: boolean): void => {
     update((current) => ({ ...current, safety: { readOnly, safetyGeneration: current.safety.safetyGeneration + 1 } }), "safety-changed");
   };
-  const resetSessionState = (): void => {
+  const unsubscribeAll = async (): Promise<void> => {
+    const activeSubscriptions = [...subscriptions.values()];
+    subscriptions.clear();
+    await Promise.all(activeSubscriptions.map((subscription) => subscription.unsubscribe().catch(() => undefined)));
+  };
+
+  const resetSessionState = (seedBrowseQueue = false): void => {
     indexed.clear();
     subscriptions.clear();
     trendPoints.clear();
+    shallowBrowseQueue.length = 0;
+    queuedShallowBrowseNodes.clear();
+    visitedShallowBrowseNodes.clear();
+    if (seedBrowseQueue) {
+      shallowBrowseQueue.push("i=85");
+      queuedShallowBrowseNodes.add("i=85");
+    }
     browseRequests = 0;
     lastShallowBrowseAt = undefined;
     if (shallowBrowseTimer !== undefined) timers.clearTimeout(shallowBrowseTimer);
@@ -624,8 +647,7 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
       session = undefined;
       unsubscribeConnectionLoss?.();
       unsubscribeConnectionLoss = undefined;
-      for (const subscription of subscriptions.values()) await subscription.unsubscribe().catch(() => undefined);
-      subscriptions.clear();
+      await unsubscribeAll();
       update((current) => ({
         ...current,
         connection: { ...current.connection, state: "connection-lost", error: "The OPC UA connection was lost." },
@@ -636,16 +658,21 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
   };
 
   const shallowBrowse = async (): Promise<void> => {
-    if (!session || browseRequests >= config.shallowBrowseRequestBudget) {
+    if (!session || browseRequests >= config.shallowBrowseRequestBudget || shallowBrowseQueue.length === 0) {
       update((current) => ({ ...current, search: { ...current.search, coverage: "incomplete" } }), "search-changed");
       return;
     }
     const now = dependencies.clock.now().getTime();
     if (lastShallowBrowseAt !== undefined && now - lastShallowBrowseAt < config.shallowBrowseIntervalMilliseconds) return;
-    browseRequests += 1;
     const currentSession = session;
+    const generation = state.connection.connectionGeneration;
+    const nodeId = shallowBrowseQueue.shift()!;
+    queuedShallowBrowseNodes.delete(nodeId);
+    visitedShallowBrowseNodes.add(nodeId);
+    browseRequests += 1;
     update((current) => ({ ...current, search: { ...current.search, requests: browseRequests, coverage: "incomplete" } }), "search-changed");
-    const result = await currentSession.browse({ nodeId: "i=85", maxRequests: 1 });
+    const result = await currentSession.browse({ nodeId, maxRequests: 1 });
+    if (session !== currentSession || state.connection.connectionGeneration !== generation) return;
     lastShallowBrowseAt = dependencies.clock.now().getTime();
     for (const reference of result.references) {
       indexed.set(reference.nodeId, {
@@ -654,6 +681,11 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
         displayName: reference.displayName.text,
         explicitBrowse: false,
       });
+      const browseable = reference.isForward && ["Object", "ObjectType", "VariableType", "View"].includes(reference.nodeClass);
+      if (browseable && !visitedShallowBrowseNodes.has(reference.nodeId) && !queuedShallowBrowseNodes.has(reference.nodeId)) {
+        shallowBrowseQueue.push(reference.nodeId);
+        queuedShallowBrowseNodes.add(reference.nodeId);
+      }
     }
     update((current) => ({ ...current, search: { ...current.search, requests: browseRequests, coverage: "incomplete" } }), "search-changed");
   };
@@ -675,7 +707,7 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
       update((current) => ({ ...current, connection: { ...current.connection, state: "connecting", endpointUrl: request.endpointUrl } }), "connection-changed");
       try {
         session = await client.connect(request);
-        resetSessionState();
+        resetSessionState(true);
         const generation = state.connection.connectionGeneration + 1;
         const connectedSession = session;
         unsubscribeConnectionLoss?.();
@@ -692,11 +724,14 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
       session = undefined;
       unsubscribeConnectionLoss?.();
       unsubscribeConnectionLoss = undefined;
-      for (const subscription of subscriptions.values()) await subscription.unsubscribe().catch(() => undefined);
-      await client.disconnect();
-      resetSessionState();
-      update((current) => ({ ...current, connection: { state: "disconnected", connectionGeneration: current.connection.connectionGeneration } }), "connection-changed");
-      markSafety(true);
+      try {
+        await unsubscribeAll();
+        await client.disconnect();
+      } finally {
+        resetSessionState();
+        update((current) => ({ ...current, connection: { state: "disconnected", connectionGeneration: current.connection.connectionGeneration } }), "connection-changed");
+        markSafety(true);
+      }
     }),
     setReadOnly: (readOnly, confirmation) => serialized(async () => {
       if (!readOnly && confirmation !== true && confirmation !== "DISABLE_READ_ONLY") throw new ApplicationError("confirmation_required", "Disabling Read-Only Mode requires confirmation.");
@@ -704,44 +739,61 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
       if (state.safety.readOnly !== readOnly) markSafety(readOnly);
     }),
     browse: (request) => serialized(async () => {
-      const result = await requireSession().browse(request);
+      const currentSession = requireSession();
+      const generation = state.connection.connectionGeneration;
+      const result = await currentSession.browse(request);
+      if (session !== currentSession || state.connection.connectionGeneration !== generation) return result;
       for (const reference of result.references) {
         indexed.set(reference.nodeId, { nodeId: reference.nodeId, browseName: reference.browseName.name, displayName: reference.displayName.text, explicitBrowse: true });
       }
       return result;
     }),
-    read: async (request): Promise<OpcUaReadResult | OpcUaReadResult[]> => safeRead<OpcUaReadResult | OpcUaReadResult[]>(() => Array.isArray(request) ? requireSession().read(request) : requireSession().read(request)),
+    read: async (request): Promise<OpcUaReadResult | OpcUaReadResult[]> => {
+      const currentSession = requireSession();
+      const generation = state.connection.connectionGeneration;
+      return safeRead<OpcUaReadResult | OpcUaReadResult[]>(currentSession, generation, () => Array.isArray(request) ? currentSession.read(request) : currentSession.read(request));
+    },
     search: async (query, candidates = []) => {
       for (const candidate of candidates) indexed.set(candidate.nodeId, { ...candidate, explicitBrowse: candidate.explicitBrowse ?? true });
       const results = rankSearch([...indexed.values()], query);
       const incompleteCoverage = state.search.coverage === "incomplete" || [...indexed.values()].some((candidate) => candidate.explicitBrowse !== true);
+      const searchSession = session;
+      const searchGeneration = state.connection.connectionGeneration;
       if (!results.length && session && browseRequests < config.shallowBrowseRequestBudget) {
         const elapsed = lastShallowBrowseAt === undefined ? config.shallowBrowseIntervalMilliseconds : dependencies.clock.now().getTime() - lastShallowBrowseAt;
         if (elapsed >= config.shallowBrowseIntervalMilliseconds) {
           await serializedShallowBrowse();
         } else if (shallowBrowseTimer === undefined) {
           await new Promise<void>((resolve) => {
+            const scheduledSession = session;
+            const scheduledGeneration = state.connection.connectionGeneration;
             shallowBrowseTimerResolve = resolve;
             shallowBrowseTimer = timers.setTimeout(() => {
               shallowBrowseTimer = undefined;
               shallowBrowseTimerResolve = undefined;
+              if (session !== scheduledSession || state.connection.connectionGeneration !== scheduledGeneration) {
+                resolve();
+                return;
+              }
               void serializedShallowBrowse().finally(resolve);
             }, config.shallowBrowseIntervalMilliseconds - Math.max(0, elapsed));
           });
         }
       }
+      if (session !== searchSession || state.connection.connectionGeneration !== searchGeneration) return state.search;
       const search = { ...state.search, results: rankSearch([...indexed.values()], query), coverage: incompleteCoverage ? "incomplete" as const : state.search.coverage, requests: browseRequests };
       update((current) => ({ ...current, search }), "search-changed");
       return search;
     },
     inspectVariable: async (nodeId, metadata) => {
-      const result = await safeRead(() => requireSession().read({ nodeId }));
+      const currentSession = requireSession();
+      const generation = state.connection.connectionGeneration;
+      const result = await safeRead(currentSession, generation, () => currentSession.read({ nodeId }));
       const value = result.dataValue;
-      const numeric = valueAsNumber(value.value);
-      const range = metadata?.range;
-      const outOfRange = numeric !== undefined && ((range?.low !== undefined && numeric < range.low) || (range?.high !== undefined && numeric > range.high));
-      const inspection: VariableNodeInspection = { nodeId, metadata, value, stale: false, outOfRange, updatedAt: dependencies.clock.now().toISOString() };
-      update((current) => ({ ...current, inspections: { ...current.inspections, [nodeId]: inspection } }), "inspection-changed");
+      const inspection: VariableNodeInspection = { nodeId, metadata, value, stale: false, outOfRange: isOutOfRange(value.value, metadata?.range), updatedAt: dependencies.clock.now().toISOString() };
+      if (session === currentSession && state.connection.connectionGeneration === generation) {
+        update((current) => ({ ...current, inspections: { ...current.inspections, [nodeId]: inspection } }), "inspection-changed");
+      }
       return inspection;
     },
     addToWatchlist: async (nodeId) => {
@@ -752,16 +804,17 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
     removeFromWatchlist: async (nodeId) => update((current) => ({ ...current, watchlist: current.watchlist.filter((item) => item !== nodeId) }), "watchlist-changed"),
     subscribe: async (nodeId) => {
       if (subscriptions.has(nodeId)) return;
-      const subscription = await requireSession().subscribe({ nodeId }, (value) => {
+      const currentSession = requireSession();
+      const generation = state.connection.connectionGeneration;
+      const subscription = await currentSession.subscribe({ nodeId }, (value) => {
+        if (session !== currentSession || state.connection.connectionGeneration !== generation) return;
         const timestamp = value.sourceTimestamp ?? value.serverTimestamp ?? dependencies.clock.now().toISOString();
         const point: TrendPoint = { timestamp, value: value.value?.value ?? null, status: value.status };
         const points = [...(trendPoints.get(nodeId) ?? []), point].slice(-config.trendPointLimit);
         trendPoints.set(nodeId, points);
         update((current) => {
           const previous = current.inspections[nodeId];
-          const numeric = valueAsNumber(value.value);
-          const range = previous?.metadata?.range;
-          const outOfRange = numeric !== undefined && ((range?.low !== undefined && numeric < range.low) || (range?.high !== undefined && numeric > range.high));
+          const outOfRange = isOutOfRange(value.value, previous?.metadata?.range);
           return {
             ...current,
             inspections: previous ? { ...current.inspections, [nodeId]: { ...previous, value, stale: false, outOfRange, updatedAt: timestamp } } : current.inspections,
@@ -769,6 +822,10 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
           };
         }, "trend-changed");
       });
+      if (session !== currentSession || state.connection.connectionGeneration !== generation) {
+        await subscription.unsubscribe().catch(() => undefined);
+        return;
+      }
       subscriptions.set(nodeId, subscription);
     },
     unsubscribe: async (nodeId) => {
@@ -786,10 +843,14 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
       unsubscribeConnectionLoss?.();
       unsubscribeConnectionLoss = undefined;
       session = undefined;
-      for (const subscription of subscriptions.values()) await subscription.unsubscribe().catch(() => undefined);
-      await client.disconnect();
-      resetSessionState();
-      markSafety(true);
+      try {
+        await unsubscribeAll();
+        await client.disconnect();
+      } finally {
+        resetSessionState();
+        update((current) => ({ ...current, connection: { state: "disconnected", connectionGeneration: current.connection.connectionGeneration } }), "connection-changed");
+        markSafety(true);
+      }
     }),
   };
   return facade;

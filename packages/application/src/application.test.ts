@@ -100,14 +100,60 @@ describe("application facade", () => {
     expect(saved[0]).not.toHaveProperty("clientCertificateReference");
   });
 
+  it("drops shallow-browse results from an old connection and resets its queue", async () => {
+    let releaseOldBrowse!: () => void;
+    const oldBrowse = new Promise<void>((resolve) => { releaseOldBrowse = resolve; });
+    let connections = 0;
+    const browsed: string[] = [];
+    const opcua = client();
+    opcua.connect = async (request) => {
+      const session = await client().connect(request);
+      connections += 1;
+      return {
+        ...session,
+        browse: async (browseRequest) => {
+          browsed.push(browseRequest.nodeId);
+          if (connections === 1) await oldBrowse;
+          return { nodeId: browseRequest.nodeId, references: [], status: { name: "Good", value: 0 }, requests: 1, truncated: false };
+        },
+      };
+    };
+    let now = 0;
+    const application = createApplication({
+      clientFactory: () => opcua,
+      savedConnections: store,
+      clock: { now: () => new Date(now) },
+      events: { publish: () => undefined },
+    });
+    await application.connect({ endpointUrl: "opc.tcp://old:4840" });
+    const pendingSearch = application.search("missing");
+    await Promise.resolve();
+    await application.disconnect();
+    await application.connect({ endpointUrl: "opc.tcp://new:4840" });
+    releaseOldBrowse();
+    await pendingSearch;
+    expect(application.snapshot().search.requests).toBe(0);
+    now = 1_000;
+    await application.search("missing-again");
+    expect(browsed).toEqual(["i=85", "i=85"]);
+  });
+
   it("exposes no direct mutation facade and counts shallow browsing one request at a time", async () => {
     let browseCalls = 0;
     let browseMaxRequests: number | undefined;
     const opcua = client();
+    const browseNodeIds: string[] = [];
     opcua.connect = async () => ({ ...await client().connect({ endpointUrl: "opc.tcp://plc:4840" }), browse: async (request) => {
       browseCalls += 1;
+      browseNodeIds.push(request.nodeId);
       browseMaxRequests = request.maxRequests;
-      return { nodeId: request.nodeId, references: [], status: { name: "Good", value: 0 }, requests: 1, truncated: false };
+      return {
+        nodeId: request.nodeId,
+        references: request.nodeId === "i=85" ? [{ nodeId: "ns=2;s=child", browseName: { namespaceIndex: 2, name: "child" }, displayName: { text: "child" }, nodeClass: "Object", isForward: true }] : [],
+        status: { name: "Good", value: 0 },
+        requests: 1,
+        truncated: false,
+      };
     } });
     let now = 0;
     const application = createApplication({
@@ -125,6 +171,7 @@ describe("application facade", () => {
     now = 1_000;
     await application.search("missing-again");
     expect(browseCalls).toBe(2);
+    expect(browseNodeIds).toEqual(["i=85", "ns=2;s=child"]);
   });
 
   it("bounds concurrent safe reads", async () => {
@@ -197,9 +244,171 @@ describe("application facade", () => {
     const inspection = await application.inspectVariable("ns=2;s=level", { nodeId: "ns=2;s=level", range: { high: 10 } });
     expect(inspection.outOfRange).toBe(true);
     lost();
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let attempt = 0; attempt < 5; attempt += 1) await Promise.resolve();
     expect(application.snapshot().inspections["ns=2;s=level"]?.stale).toBe(true);
+  });
+
+  it("restores Read-Only Mode when disconnect cleanup rejects", async () => {
+    const opcua = client();
+    opcua.disconnect = async () => { throw new Error("disconnect failed"); };
+    const application = createApplication({
+      clientFactory: () => opcua,
+      savedConnections: store,
+      clock: { now: () => new Date("2026-01-01T00:00:00.000Z") },
+      events: { publish: () => undefined },
+    });
+    await application.connect({ endpointUrl: "opc.tcp://plc:4840" });
+    await application.setReadOnly(false, true);
+
+    await expect(application.disconnect()).rejects.toThrow("disconnect failed");
+    expect(application.snapshot()).toMatchObject({
+      connection: { state: "disconnected" },
+      safety: { readOnly: true },
+    });
+  });
+
+  it("restores Read-Only Mode when close cleanup rejects", async () => {
+    const opcua = client();
+    opcua.disconnect = async () => { throw new Error("close failed"); };
+    const application = createApplication({
+      clientFactory: () => opcua,
+      savedConnections: store,
+      clock: { now: () => new Date("2026-01-01T00:00:00.000Z") },
+      events: { publish: () => undefined },
+    });
+    await application.connect({ endpointUrl: "opc.tcp://plc:4840" });
+    await application.setReadOnly(false, true);
+
+    await expect(application.close()).rejects.toThrow("close failed");
+    expect(application.snapshot()).toMatchObject({
+      connection: { state: "disconnected" },
+      safety: { readOnly: true },
+    });
+  });
+
+  it("does not run a queued Safe Read against a reconnected session", async () => {
+    let releaseOldRead!: () => void;
+    const oldRead = new Promise<void>((resolve) => { releaseOldRead = resolve; });
+    let connections = 0;
+    let newReadCalls = 0;
+    const opcua = client();
+    opcua.connect = async (request) => {
+      const session = await client().connect(request);
+      connections += 1;
+      if (connections === 1) {
+        return {
+          ...session,
+          read: (async (readRequest: OpcUaReadRequest | OpcUaReadRequest[]) => {
+            await oldRead;
+            const result = { status: { name: "Good", value: 0 } };
+            return Array.isArray(readRequest)
+              ? readRequest.map((item) => ({ ...item, attributeId: item.attributeId ?? 13, dataValue: result }))
+              : { ...readRequest, attributeId: readRequest.attributeId ?? 13, dataValue: result };
+          }) as OpcUaSession["read"],
+        };
+      }
+      return {
+        ...session,
+        read: (async (readRequest: OpcUaReadRequest | OpcUaReadRequest[]) => {
+          newReadCalls += 1;
+          const result = { status: { name: "Good", value: 0 } };
+          return Array.isArray(readRequest)
+            ? readRequest.map((item) => ({ ...item, attributeId: item.attributeId ?? 13, dataValue: result }))
+            : { ...readRequest, attributeId: readRequest.attributeId ?? 13, dataValue: result };
+        }) as OpcUaSession["read"],
+      };
+    };
+    const application = createApplication({
+      clientFactory: () => opcua,
+      savedConnections: store,
+      clock: { now: () => new Date("2026-01-01T00:00:00.000Z") },
+      config: { maxSafeReadConcurrency: 1 },
+      events: { publish: () => undefined },
+    });
+    await application.connect({ endpointUrl: "opc.tcp://old:4840" });
+    const pendingInspection = application.inspectVariable("ns=2;s=old");
+    await Promise.resolve();
+    const pendingRead = application.read({ nodeId: "ns=2;s=queued" });
+    await application.disconnect();
+    await application.connect({ endpointUrl: "opc.tcp://new:4840" });
+    releaseOldRead();
+    await pendingInspection;
+    await expect(pendingRead).rejects.toMatchObject({ code: "connection_required" });
+    expect(newReadCalls).toBe(0);
+  });
+
+  it("discards a Variable Node Inspection that completes after reconnect", async () => {
+    let releaseOldRead!: () => void;
+    const oldRead = new Promise<void>((resolve) => { releaseOldRead = resolve; });
+    let connections = 0;
+    const opcua = client();
+    opcua.connect = async (request) => {
+      const session = await client().connect(request);
+      connections += 1;
+      if (connections !== 1) return session;
+      return {
+        ...session,
+        read: (async (readRequest: OpcUaReadRequest | OpcUaReadRequest[]) => {
+          await oldRead;
+          const value = { status: { name: "Good", value: 0 }, value: { dataType: "Double" as const, arrayType: "Scalar" as const, value: 12 } };
+          return Array.isArray(readRequest)
+            ? readRequest.map((item) => ({ ...item, attributeId: item.attributeId ?? 13, dataValue: value }))
+            : { ...readRequest, attributeId: readRequest.attributeId ?? 13, dataValue: value };
+        }) as OpcUaSession["read"],
+      };
+    };
+    const application = createApplication({
+      clientFactory: () => opcua,
+      savedConnections: store,
+      clock: { now: () => new Date("2026-01-01T00:00:00.000Z") },
+      events: { publish: () => undefined },
+    });
+    await application.connect({ endpointUrl: "opc.tcp://old:4840" });
+    const pendingInspection = application.inspectVariable("ns=2;s=old");
+    await Promise.resolve();
+    await application.disconnect();
+    await application.connect({ endpointUrl: "opc.tcp://new:4840" });
+    releaseOldRead();
+    await pendingInspection;
+    expect(application.snapshot().inspections).toEqual({});
+  });
+
+  it("tears down a subscription that finishes establishing after reconnect", async () => {
+    let releaseSubscribe!: () => void;
+    const pendingSubscribe = new Promise<void>((resolve) => { releaseSubscribe = resolve; });
+    let oldHandler: ((value: OpcUaDataValue) => void) | undefined;
+    let unsubscribeCalls = 0;
+    let connections = 0;
+    const opcua = client();
+    opcua.connect = async (request) => {
+      const session = await client().connect(request);
+      connections += 1;
+      if (connections !== 1) return session;
+      return {
+        ...session,
+        subscribe: async (_request, handler) => {
+          oldHandler = handler;
+          await pendingSubscribe;
+          return { unsubscribe: async () => { unsubscribeCalls += 1; } };
+        },
+      };
+    };
+    const application = createApplication({
+      clientFactory: () => opcua,
+      savedConnections: store,
+      clock: { now: () => new Date("2026-01-01T00:00:00.000Z") },
+      events: { publish: () => undefined },
+    });
+    await application.connect({ endpointUrl: "opc.tcp://old:4840" });
+    const pending = application.subscribe("ns=2;s=old");
+    await Promise.resolve();
+    await application.disconnect();
+    await application.connect({ endpointUrl: "opc.tcp://new:4840" });
+    releaseSubscribe();
+    await pending;
+    oldHandler?.({ status: { name: "Good", value: 0 }, value: { dataType: "Double", arrayType: "Scalar", value: 10 } });
+    expect(unsubscribeCalls).toBe(1);
+    expect(application.getTrend("ns=2;s=old")).toEqual([]);
   });
 
   it("recomputes range state from subscription updates and clears session state on reconnect", async () => {
