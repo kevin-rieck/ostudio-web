@@ -1,10 +1,12 @@
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { generateContractSource } from "./generate-contract.js";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const fixtureDirectory = path.join(repositoryRoot, "testdata", "conformance");
 const contractPath = path.join(repositoryRoot, "api", "openapi.yaml");
+const generatedContractPath = path.join(repositoryRoot, "packages", "contracts", "src", "index.ts");
 
 const expectedFixtureKinds = [
   "diagnostic-redaction",
@@ -225,7 +227,8 @@ function validateSchemaProperties(schemaName: string, schema: unknown): void {
     if (!lowerCamelCase.test(propertyName)) {
       throw new Error(`components.schemas.${schemaName} has non-lower-camel property ${propertyName}`);
     }
-    if (forbiddenModelProperty.test(propertyName)) {
+    // LoginRequest is the sole intentional secret-bearing input; it is never a response model.
+    if (forbiddenModelProperty.test(propertyName) && !(schemaName === "LoginRequest" && propertyName === "password")) {
       throw new Error(`components.schemas.${schemaName} exposes prohibited property ${propertyName}`);
     }
   }
@@ -235,6 +238,33 @@ function validateSchemaProperties(schemaName: string, schema: unknown): void {
         throw new Error(`components.schemas.${schemaName} requires an undeclared property`);
       }
     }
+  }
+}
+
+function countSchemaReferences(value: unknown, schemaName: string): number {
+  if (Array.isArray(value)) return value.reduce((count, item) => count + countSchemaReferences(item, schemaName), 0);
+  if (!isObject(value)) return 0;
+  const ownReference = value.$ref === `#/components/schemas/${schemaName}` ? 1 : 0;
+  return ownReference + Object.values(value).reduce((count, child) => count + countSchemaReferences(child, schemaName), 0);
+}
+
+function validatePasswordSchemaUsage(root: JsonObject): void {
+  const paths = requireObject(root.paths, "api/openapi.yaml.paths");
+  let requestBodyReferences = 0;
+  for (const pathItem of Object.values(paths)) {
+    if (!isObject(pathItem)) continue;
+    for (const [method, operationValue] of Object.entries(pathItem)) {
+      if (!["get", "post", "put", "delete", "patch"].includes(method) || !isObject(operationValue)) continue;
+      if (isObject(operationValue.requestBody)) requestBodyReferences += countSchemaReferences(operationValue.requestBody, "LoginRequest");
+    }
+  }
+  const pathReferences = countSchemaReferences(paths, "LoginRequest");
+  if (requestBodyReferences !== 1 || pathReferences !== requestBodyReferences) {
+    throw new Error("LoginRequest must be referenced by exactly one request body and no other operation data");
+  }
+  const components = requireObject(root.components, "api/openapi.yaml.components");
+  if (countSchemaReferences(components, "LoginRequest") > 0) {
+    throw new Error("LoginRequest must not be referenced from component responses or shared component data");
   }
 }
 
@@ -255,6 +285,7 @@ function validateOpenApi(contract: unknown): void {
   for (const [schemaName, schema] of Object.entries(schemas)) {
     validateSchemaProperties(schemaName, schema);
   }
+  validatePasswordSchemaUsage(root);
   const operationIds = new Set<string>();
   for (const [route, pathItemValue] of Object.entries(root.paths)) {
     const pathItem = requireObject(pathItemValue, `path ${route}`);
@@ -292,7 +323,11 @@ function validateOpenApi(contract: unknown): void {
 }
 
 export function checkContract(): ContractCheckResult {
-  validateOpenApi(readJson(contractPath));
+  const contract = readJson(contractPath);
+  validateOpenApi(contract);
+  if (generateContractSource() !== readFileSync(generatedContractPath, "utf8")) {
+    throw new Error("packages/contracts/src/index.ts is out of date; run npm run contract:generate");
+  }
 
   const fixtureFiles = readdirSync(fixtureDirectory)
     .filter((fileName) => fileName.endsWith(".json"))

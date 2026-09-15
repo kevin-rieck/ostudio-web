@@ -38,3 +38,45 @@ h1 {
 p {
   line-height: 1.6;
 }
+
+form {
+  display: grid;
+  gap: 1rem;
+  max-width: 24rem;
+}
+
+label {
+  display: grid;
+  gap: 0.35rem;
+  font-weight: 600;
+}
+
+input,
+button {
+  border: 1px solid #506078;
+  border-radius: 0.35rem;
+  font: inherit;
+  padding: 0.65rem 0.75rem;
+}
+
+button {
+  color: #10151d;
+  background: #75baff;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 3px solid #f4ca64;
+  outline-offset: 2px;
+}
+
+.error {
+  color: #ff9a9a;
+}
+
+.warning {
+  border-left: 4px solid #f4ca64;
+  padding-left: 0.75rem;
+}

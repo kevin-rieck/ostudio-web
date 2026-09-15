@@ -34,6 +34,45 @@
         }
       }
     },
+    "/api/v1/auth/login": {
+      "post": {
+        "operationId": "loginAdmin",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginRequest" } } }
+        },
+        "responses": {
+          "204": { "description": "The fixed admin credentials were accepted and a session cookie was issued." },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/OriginRejected" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "operationId": "logoutAdmin",
+        "security": [{ "sessionCookie": [] }],
+        "responses": {
+          "204": { "description": "The session was ended." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/OriginRejected" }
+        }
+      }
+    },
+    "/api/v1/auth/session": {
+      "get": {
+        "operationId": "getAuthenticationSession",
+        "responses": {
+          "200": {
+            "description": "Authenticated browser capabilities.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuthSession" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
     "/api/v1/build": {
       "get": {
         "operationId": "getBuildInfo",
@@ -190,6 +229,14 @@
         "description": "Authentication is required or the session has expired.",
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
       },
+      "OriginRejected": {
+        "description": "The request origin is not allowed.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
+      },
+      "InternalError": {
+        "description": "The request could not be completed.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
+      },
       "BadRequest": {
         "description": "The request is invalid.",
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
@@ -216,6 +263,24 @@
       }
     },
     "schemas": {
+      "LoginRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["username", "password"],
+        "properties": {
+          "username": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "password": { "type": "string", "minLength": 1, "maxLength": 1024 }
+        }
+      },
+      "AuthSession": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["authenticated", "insecureDevelopment"],
+        "properties": {
+          "authenticated": { "type": "boolean" },
+          "insecureDevelopment": { "type": "boolean" }
+        }
+      },
       "ApiError": {
         "type": "object",
         "additionalProperties": false,
@@ -233,6 +298,7 @@
         "enum": [
           "authentication_required",
           "bad_request",
+          "internal_error",
           "confirmation_required",
           "controller_required",
           "controller_generation_mismatch",
