@@ -7,6 +7,27 @@ import { createServer, type TimerScheduler, type WebServer } from "./server.js";
 let server: WebServer | undefined;
 const developmentEnvironment = { OSTUDIO_INSECURE_DEV: "true", OSTUDIO_ADMIN_PASSWORD: "correct horse battery staple", OSTUDIO_PUBLIC_ORIGIN: "http://localhost:8080" };
 
+function fakeTimers(): { now: () => number; setTime: (value: number) => void; scheduled: Array<{ callback: () => void; milliseconds: number }>; timers: TimerScheduler } {
+  let timestamp = 0;
+  const scheduled: Array<{ callback: () => void; milliseconds: number }> = [];
+  return {
+    now: () => timestamp,
+    setTime: (value) => { timestamp = value; },
+    scheduled,
+    timers: {
+      setTimeout: (callback, milliseconds) => {
+        const entry = { callback, milliseconds };
+        scheduled.push(entry);
+        return entry;
+      },
+      clearTimeout: (handle) => {
+        const index = scheduled.indexOf(handle as (typeof scheduled)[number]);
+        if (index >= 0) scheduled.splice(index, 1);
+      },
+    },
+  };
+}
+
 afterEach(async () => {
   await server?.shutdown();
   server = undefined;
@@ -135,31 +156,94 @@ describe("server routes", () => {
   });
 
   it("expires controller leases on the clock without another request", async () => {
-    let timestamp = 0;
-    const scheduled: Array<{ callback: () => void; milliseconds: number }> = [];
-    const timers: TimerScheduler = {
-      setTimeout: (callback, milliseconds) => {
-        const entry = { callback, milliseconds };
-        scheduled.push(entry);
-        return entry;
-      },
-      clearTimeout: (handle) => {
-        const index = scheduled.indexOf(handle as (typeof scheduled)[number]);
-        if (index >= 0) scheduled.splice(index, 1);
-      },
-    };
+    const clock = fakeTimers();
     server = await createServer({
-      now: () => timestamp,
-      timers,
+      now: clock.now,
+      timers: clock.timers,
       env: { OSTUDIO_INSECURE_DEV: "true", OSTUDIO_ADMIN_PASSWORD: "correct horse battery staple", OSTUDIO_PUBLIC_ORIGIN: "http://localhost:8080" },
     });
     const login = await server.inject({ method: "POST", url: "/api/v1/auth/login", headers: { origin: "http://localhost:8080" }, payload: { username: "admin", password: "correct horse battery staple" } });
     const cookie = String(login.headers["set-cookie"]);
     expect((await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers: { origin: "http://localhost:8080", cookie } })).json()).toMatchObject({ role: "controller" });
-    expect(scheduled).toHaveLength(1);
-    timestamp = 15_000;
-    scheduled.shift()!.callback();
+    expect(clock.scheduled).toHaveLength(1);
+    clock.setTime(15_000);
+    clock.scheduled.shift()!.callback();
     expect((await server.inject({ method: "GET", url: "/api/v1/snapshot", headers: { cookie } })).json()).toMatchObject({ controller: { role: "observer", controllerGeneration: 2 } });
+  });
+
+  it("starts the disconnect grace period after lease loss and permits only same-browser recovery", async () => {
+    const clock = fakeTimers();
+    const calls: string[] = [];
+    server = await createServer({
+      now: clock.now,
+      timers: clock.timers,
+      controllerLeaseMilliseconds: 10,
+      controllerDisconnectGraceMilliseconds: 20,
+      runtime: { setReadOnly: () => { calls.push("read-only"); }, disconnect: async () => { calls.push("disconnect"); } },
+      env: developmentEnvironment,
+    });
+    const login = async (): Promise<string> => {
+      const response = await server!.inject({ method: "POST", url: "/api/v1/auth/login", headers: { origin: "http://localhost:8080" }, payload: { username: "admin", password: "correct horse battery staple" } });
+      return String(response.headers["set-cookie"]);
+    };
+    const first = await login();
+    const second = await login();
+    await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers: { origin: "http://localhost:8080", cookie: first } });
+    clock.setTime(10);
+    clock.scheduled.shift()!.callback();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect((await server.inject({ method: "GET", url: "/api/v1/snapshot", headers: { cookie: first } })).json()).toMatchObject({ controller: { role: "observer" } });
+    expect((await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers: { origin: "http://localhost:8080", cookie: second } })).json()).toMatchObject({ role: "observer" });
+    expect((await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers: { origin: "http://localhost:8080", cookie: first } })).json()).toMatchObject({ role: "controller" });
+    expect(calls).toEqual(["read-only", "read-only"]);
+    clock.setTime(20);
+    await server.inject({ method: "POST", url: "/api/v1/controller/takeover", headers: { origin: "http://localhost:8080", cookie: second } });
+    expect(calls).toEqual(["read-only", "read-only", "read-only"]);
+  });
+
+  it("disconnects after grace when the expired controller does not recover", async () => {
+    const clock = fakeTimers();
+    const calls: string[] = [];
+    server = await createServer({
+      now: clock.now,
+      timers: clock.timers,
+      controllerLeaseMilliseconds: 10,
+      controllerDisconnectGraceMilliseconds: 20,
+      runtime: { disconnect: async () => { calls.push("disconnect"); } },
+      env: developmentEnvironment,
+    });
+    const login = await server.inject({ method: "POST", url: "/api/v1/auth/login", headers: { origin: "http://localhost:8080" }, payload: { username: "admin", password: "correct horse battery staple" } });
+    const cookie = String(login.headers["set-cookie"]);
+    await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers: { origin: "http://localhost:8080", cookie } });
+    clock.setTime(10);
+    clock.scheduled.shift()!.callback();
+    await Promise.resolve();
+    await Promise.resolve();
+    clock.setTime(30);
+    clock.scheduled.shift()!.callback();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(calls).toEqual(["disconnect"]);
+  });
+
+  it("rejects stale lease renewals from the current controller", async () => {
+    server = await createServer({ env: developmentEnvironment });
+    const login = await server.inject({ method: "POST", url: "/api/v1/auth/login", headers: { origin: "http://localhost:8080" }, payload: { username: "admin", password: "correct horse battery staple" } });
+    const cookie = String(login.headers["set-cookie"]);
+    await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers: { origin: "http://localhost:8080", cookie } });
+    expect((await server.inject({ method: "POST", url: "/api/v1/controller/renew?controllerGeneration=0", headers: { origin: "http://localhost:8080", cookie } })).statusCode).toBe(409);
+    expect((await server.inject({ method: "POST", url: "/api/v1/controller/renew?controllerGeneration=1", headers: { origin: "http://localhost:8080", cookie } })).statusCode).toBe(204);
+  });
+
+  it("does not transfer control when restoring Read-Only Mode fails", async () => {
+    let attempts = 0;
+    server = await createServer({ runtime: { setReadOnly: () => { if (attempts++ === 0) throw new Error("failed"); } }, env: developmentEnvironment });
+    const login = async (): Promise<string> => String((await server!.inject({ method: "POST", url: "/api/v1/auth/login", headers: { origin: "http://localhost:8080" }, payload: { username: "admin", password: "correct horse battery staple" } })).headers["set-cookie"]);
+    const first = await login();
+    const second = await login();
+    await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers: { origin: "http://localhost:8080", cookie: first } });
+    expect((await server.inject({ method: "POST", url: "/api/v1/controller/takeover", headers: { origin: "http://localhost:8080", cookie: second } })).statusCode).toBe(500);
+    expect((await server.inject({ method: "GET", url: "/api/v1/snapshot", headers: { cookie: first } })).json()).toMatchObject({ controller: { role: "controller", controllerGeneration: 1 } });
   });
 
   it("revokes the old browser on takeover", async () => {
@@ -172,7 +256,7 @@ describe("server routes", () => {
     const second = await login();
     await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers: { origin: "http://localhost:8080", cookie: first } });
     expect((await server.inject({ method: "POST", url: "/api/v1/controller/takeover", headers: { origin: "http://localhost:8080", cookie: second } })).json()).toMatchObject({ role: "controller" });
-    expect((await server.inject({ method: "POST", url: "/api/v1/controller/renew", headers: { origin: "http://localhost:8080", cookie: first } })).statusCode).toBe(409);
+    expect((await server.inject({ method: "POST", url: "/api/v1/controller/renew?controllerGeneration=1", headers: { origin: "http://localhost:8080", cookie: first } })).statusCode).toBe(409);
   });
 
   it("uses server-owned event sequences and emits a gap resynchronization", async () => {

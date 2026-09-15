@@ -216,7 +216,7 @@ export interface ApiClient {
   getDiagnosticReport(): Promise<DiagnosticReport>;
   attachController(): Promise<ControllerState>;
   takeOverController(): Promise<ControllerState>;
-  renewControllerLease(): Promise<void>;
+  renewControllerLease(controllerGeneration: number): Promise<void>;
   prepareMutation(request: PrepareMutationRequest): Promise<PrepareMutationResponse>;
   confirmMutation(operationId: OperationId, request: ConfirmMutationRequest): Promise<OperationOutcome>;
 }
@@ -290,8 +290,11 @@ export function createApiClient(transport: ContractTransport = defaultTransport,
     return send<ControllerState>("POST", "/api/v1/controller/takeover");
   },
 
-  renewControllerLease(): Promise<void> {
-    return send<void>("POST", "/api/v1/controller/renew");
+  renewControllerLease(controllerGeneration: number): Promise<void> {
+    const query = new URLSearchParams();
+    if (controllerGeneration !== undefined) query.set("controllerGeneration", String(controllerGeneration));
+    const route = "/api/v1/controller/renew" + (query.toString() ? "?" + query.toString() : "");
+    return send<void>("POST", route);
   },
 
   prepareMutation(request: PrepareMutationRequest): Promise<PrepareMutationResponse> {

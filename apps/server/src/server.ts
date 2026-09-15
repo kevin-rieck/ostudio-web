@@ -4,12 +4,14 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import { loginRequestSchema, type EventEnvelope } from "@ostudio/contracts";
+import { loginRequestSchema, type EventEnvelope, type Snapshot } from "@ostudio/contracts";
 import { createAuthenticator, authConstants, type AuthSession } from "./auth.js";
 
 const SESSION_COOKIE = "ostudio_session";
-const CONTROLLER_LEASE_MS = 15_000;
+const DEFAULT_CONTROLLER_LEASE_MS = 15_000;
+const DEFAULT_CONTROLLER_DISCONNECT_GRACE_MS = 5 * 60_000;
 const SSE_QUEUE_LIMIT = 100;
+const SSE_HEARTBEAT_MS = 15_000;
 type EventType = EventEnvelope["type"];
 type Environment = NodeJS.ProcessEnv;
 export interface TimerScheduler {
@@ -18,6 +20,7 @@ export interface TimerScheduler {
 }
 
 export interface RuntimeShutdownHooks {
+  snapshot?(): Snapshot;
   setReadOnly?(readOnly: true): Promise<void> | void;
   disconnect?(): Promise<void>;
   close?(): Promise<void>;
@@ -30,6 +33,8 @@ export interface ServerOptions {
   now?: () => number;
   timers?: TimerScheduler;
   runtime?: RuntimeShutdownHooks;
+  controllerLeaseMilliseconds?: number;
+  controllerDisconnectGraceMilliseconds?: number;
 }
 
 export interface WebServer extends FastifyInstance {
@@ -46,7 +51,16 @@ type RuntimeConfig = {
   insecureDevelopment: boolean;
   trustedProxyCidrs: string[];
   password: string;
+  controllerLeaseMilliseconds: number;
+  controllerDisconnectGraceMilliseconds: number;
 };
+
+function positiveMilliseconds(value: string | undefined, name: string, fallback: number): number {
+  if (value === undefined) return fallback;
+  const milliseconds = Number(value);
+  if (!Number.isSafeInteger(milliseconds) || milliseconds <= 0) throw new Error(`${name} must be a positive number of milliseconds.`);
+  return milliseconds;
+}
 
 function errorBody(code: string, message: string, operationId?: string): Record<string, unknown> {
   return { code, message, correlationId: `cor-${randomBytes(16).toString("base64url")}`, ...(operationId ? { operationId } : {}) };
@@ -104,6 +118,8 @@ async function runtimeConfig(environment: Environment): Promise<RuntimeConfig> {
     insecureDevelopment: !production && (insecureDevelopment || publicUrl.protocol !== "https:"),
     trustedProxyCidrs: (environment.OSTUDIO_TRUSTED_PROXY_CIDRS ?? environment.OPCUA_STUDIO_TRUSTED_PROXY_CIDRS ?? "").split(",").map((value) => value.trim()).filter(Boolean),
     password,
+    controllerLeaseMilliseconds: positiveMilliseconds(environment.OSTUDIO_CONTROLLER_LEASE_MS ?? environment.OPCUA_STUDIO_CONTROLLER_LEASE_MS, "OSTUDIO_CONTROLLER_LEASE_MS", DEFAULT_CONTROLLER_LEASE_MS),
+    controllerDisconnectGraceMilliseconds: positiveMilliseconds(environment.OSTUDIO_CONTROLLER_DISCONNECT_GRACE_MS ?? environment.OPCUA_STUDIO_CONTROLLER_DISCONNECT_GRACE_MS, "OSTUDIO_CONTROLLER_DISCONNECT_GRACE_MS", DEFAULT_CONTROLLER_DISCONNECT_GRACE_MS),
   };
 }
 
@@ -144,7 +160,7 @@ function unauthorized(reply: FastifyReply): void {
   void reply.code(401).send(errorBody("authentication_required", "Authentication is required."));
 }
 
-function controllerState(session: AuthSession, owner: string | undefined, generation: number, expiresAt: number | undefined): Record<string, unknown> {
+function controllerState(session: AuthSession, owner: string | undefined, generation: number, expiresAt: number | undefined): Snapshot["controller"] {
   return {
     role: owner === session.id ? "controller" : "observer",
     controllerGeneration: generation,
@@ -175,18 +191,31 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     throw new Error("Production assets are missing index.html.");
   }
   const buildVersion = environment.OSTUDIO_BUILD_VERSION ?? "0.0.0";
+  const controllerLeaseMilliseconds = options.controllerLeaseMilliseconds ?? config.controllerLeaseMilliseconds;
+  const controllerDisconnectGraceMilliseconds = options.controllerDisconnectGraceMilliseconds ?? config.controllerDisconnectGraceMilliseconds;
+  if (!Number.isSafeInteger(controllerLeaseMilliseconds) || controllerLeaseMilliseconds <= 0) throw new Error("controllerLeaseMilliseconds must be a positive integer.");
+  if (!Number.isSafeInteger(controllerDisconnectGraceMilliseconds) || controllerDisconnectGraceMilliseconds <= 0) throw new Error("controllerDisconnectGraceMilliseconds must be a positive integer.");
   let controllerOwner: string | undefined;
+  let previousController: string | undefined;
   let controllerGeneration = 0;
   let controllerLeaseExpiresAt: number | undefined;
   let controllerExpiryTimer: unknown;
+  let disconnectGraceTimer: unknown;
   let shuttingDown = false;
   let shutdownPromise: Promise<void> | undefined;
+  let controlQueue = Promise.resolve();
+  const serializeControl = <T>(operation: () => Promise<T> | T): Promise<T> => {
+    const result = controlQueue.then(operation, operation);
+    controlQueue = result.then(() => undefined, () => undefined);
+    return result;
+  };
 
   type EventClient = {
     response: import("node:http").ServerResponse;
     queue: EventEnvelope[];
     paused: boolean;
     closed: boolean;
+    heartbeat: NodeJS.Timeout;
   };
   const eventClients = new Set<EventClient>();
   const eventHistory: EventEnvelope[] = [];
@@ -196,6 +225,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     if (client.closed) return;
     client.closed = true;
     eventClients.delete(client);
+    clearInterval(client.heartbeat);
     client.response.end();
   };
   const flushEventClient = (client: EventClient): void => {
@@ -213,6 +243,14 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   const sendEvent = (client: EventClient, event: EventEnvelope): void => {
     if (client.closed) return;
     if (client.paused) {
+      if (event.type === "live-value-changed") {
+        const nodeId = "nodeId" in event.payload ? event.payload.nodeId : undefined;
+        const index = nodeId === undefined ? -1 : client.queue.findIndex((queued) => queued.type === event.type && "nodeId" in queued.payload && queued.payload.nodeId === nodeId);
+        if (index >= 0) {
+          client.queue[index] = event;
+          return;
+        }
+      }
       if (client.queue.length >= SSE_QUEUE_LIMIT) {
         closeEventClient(client);
         return;
@@ -234,18 +272,48 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     return event;
   };
   const eventSequence = (): number => sequence;
-  const onControllerExpired = (): void => {
-    if (controllerLeaseExpiresAt === undefined || now() < controllerLeaseExpiresAt) {
-      scheduleControllerExpiry();
-      return;
-    }
+  const clearDisconnectGrace = (): void => {
+    if (disconnectGraceTimer !== undefined) timers.clearTimeout(disconnectGraceTimer);
+    disconnectGraceTimer = undefined;
+  };
+  const restoreReadOnly = (): Promise<void> => Promise.resolve(options.runtime?.setReadOnly?.(true));
+  const disconnectAfterGrace = (): void => {
+    disconnectGraceTimer = undefined;
+    void serializeControl(async () => {
+      if (shuttingDown || controllerOwner !== undefined || previousController === undefined) return;
+      const disconnect = options.runtime?.disconnect ?? options.runtime?.close;
+      if (!disconnect) return;
+      try {
+        await disconnect();
+      } catch {
+        server.log.error("Unable to disconnect the runtime after controller loss.");
+      }
+    });
+  };
+  const scheduleDisconnectGrace = (): void => {
+    clearDisconnectGrace();
+    disconnectGraceTimer = timers.setTimeout(disconnectAfterGrace, controllerDisconnectGraceMilliseconds);
+  };
+  const revokeControllerState = async (): Promise<void> => {
+    if (controllerOwner === undefined) return;
+    await restoreReadOnly();
+    previousController = controllerOwner;
     controllerOwner = undefined;
     controllerLeaseExpiresAt = undefined;
     controllerExpiryTimer = undefined;
     controllerGeneration += 1;
-    void Promise.resolve(options.runtime?.setReadOnly?.(true)).catch(() => server.log.error("Unable to restore Read-Only Mode after controller expiry."));
+    scheduleDisconnectGrace();
     publishEvent("ownership-changed", { role: "observer", controllerGeneration });
   };
+  const revokeController = (): Promise<void> => serializeControl(revokeControllerState);
+  const expireController = (): Promise<void> => serializeControl(async () => {
+    if (controllerLeaseExpiresAt === undefined || now() < controllerLeaseExpiresAt) {
+      scheduleControllerExpiry();
+      return;
+    }
+    await revokeControllerState();
+  });
+  const onControllerExpired = (): void => { void expireController().catch(() => server.log.error("Unable to restore Read-Only Mode after controller expiry.")); };
   const scheduleControllerExpiry = (): void => {
     if (controllerExpiryTimer !== undefined) timers.clearTimeout(controllerExpiryTimer);
     controllerExpiryTimer = undefined;
@@ -261,10 +329,12 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       shuttingDown = true;
       if (controllerExpiryTimer !== undefined) timers.clearTimeout(controllerExpiryTimer);
       controllerExpiryTimer = undefined;
+      clearDisconnectGrace();
       controllerOwner = undefined;
+      previousController = undefined;
       controllerLeaseExpiresAt = undefined;
       controllerGeneration += 1;
-      await Promise.resolve(options.runtime?.setReadOnly?.(true)).catch(() => server.log.error("Unable to restore Read-Only Mode during shutdown."));
+      await serializeControl(restoreReadOnly);
       for (const client of [...eventClients]) closeEventClient(client);
       const disconnect = options.runtime?.disconnect ?? options.runtime?.close;
       if (disconnect) {
@@ -284,6 +354,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   server.addHook("onClose", async () => {
     if (controllerExpiryTimer !== undefined) timers.clearTimeout(controllerExpiryTimer);
     controllerExpiryTimer = undefined;
+    clearDisconnectGrace();
     for (const client of [...eventClients]) closeEventClient(client);
   });
 
@@ -303,15 +374,21 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       return;
     }
     if (!protectedApi) {
-      if (isAuthSession) current.authSession = authenticator.session(cookieValue(request.headers.cookie));
+      if (isAuthSession) {
+        const token = cookieValue(request.headers.cookie);
+        current.authSession = authenticator.session(token);
+        if (!current.authSession && token === controllerOwner) void revokeController().catch(() => server.log.error("Unable to restore Read-Only Mode after authentication expiry."));
+      }
       return;
     }
     if ((request.method !== "GET" || pathname === "/api/v1/events") && !sameOrigin(request, config)) {
       void reply.code(403).send(errorBody("origin_rejected", "The request origin is not allowed."));
       return;
     }
-    const session = authenticator.session(cookieValue(request.headers.cookie));
+    const token = cookieValue(request.headers.cookie);
+    const session = authenticator.session(token);
     if (!session) {
+      if (token === controllerOwner) void revokeController().catch(() => server.log.error("Unable to restore Read-Only Mode after authentication expiry."));
       unauthorized(reply);
       return;
     }
@@ -343,16 +420,22 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     return reply.code(204).send();
   });
   server.post("/api/v1/auth/logout", async (request, reply) => {
+    const sessionId = (request as RequestWithSession).authSession?.id;
+    await serializeControl(async () => {
+      if (sessionId !== controllerOwner) return;
+      await revokeControllerState();
+      clearDisconnectGrace();
+      previousController = undefined;
+      const disconnect = options.runtime?.disconnect ?? options.runtime?.close;
+      if (disconnect) {
+        try {
+          await disconnect();
+        } catch {
+          server.log.error("Unable to disconnect the runtime after logout.");
+        }
+      }
+    });
     authenticator.logout(cookieValue(request.headers.cookie));
-    if (controllerOwner === (request as RequestWithSession).authSession?.id) {
-      controllerOwner = undefined;
-      controllerLeaseExpiresAt = undefined;
-      controllerGeneration += 1;
-      if (controllerExpiryTimer !== undefined) timers.clearTimeout(controllerExpiryTimer);
-      controllerExpiryTimer = undefined;
-      await Promise.resolve(options.runtime?.setReadOnly?.(true)).catch(() => server.log.error("Unable to restore Read-Only Mode after logout."));
-      publishEvent("ownership-changed", { role: "observer", controllerGeneration });
-    }
     reply.header("Set-Cookie", `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict${config.secureCookies ? "; Secure" : ""}; Max-Age=0`);
     return reply.code(204).send();
   });
@@ -363,45 +446,69 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   server.get("/api/v1/build", async () => ({ buildVersion }));
   server.get("/api/v1/snapshot", async (request) => {
     const session = (request as RequestWithSession).authSession!;
+    const snapshotSequence = sequence;
+    const runtimeSnapshot = options.runtime?.snapshot?.();
     return {
-      sequence,
-
+      ...(runtimeSnapshot ?? {
+        safety: { readOnly: true, safetyGeneration: 1 },
+        connection: { state: "disconnected" as const },
+        nodes: [],
+      }),
+      sequence: snapshotSequence,
       buildVersion,
       generatedAt: new Date(now()).toISOString(),
       controller: controllerState(session, controllerOwner, controllerGeneration, controllerLeaseExpiresAt),
-      safety: { readOnly: true, safetyGeneration: 1 },
-      connection: { state: "disconnected" },
-      nodes: [],
-    };
+    } satisfies Snapshot;
   });
   server.post("/api/v1/controller/attach", async (request, reply) => {
     const session = (request as RequestWithSession).authSession!;
-    if (controllerOwner === undefined) {
+    await serializeControl(async () => {
+      if (controllerOwner !== undefined) {
+        if (controllerOwner === session.id) {
+          controllerLeaseExpiresAt = now() + controllerLeaseMilliseconds;
+          scheduleControllerExpiry();
+        }
+        return;
+      }
+      if (previousController !== undefined && previousController !== session.id) return;
+      const recovering = previousController === session.id;
+      if (recovering) await restoreReadOnly();
+      previousController = undefined;
+      clearDisconnectGrace();
       controllerOwner = session.id;
       controllerGeneration += 1;
-      controllerLeaseExpiresAt = now() + CONTROLLER_LEASE_MS;
+      controllerLeaseExpiresAt = now() + controllerLeaseMilliseconds;
       scheduleControllerExpiry();
-    }
+      publishEvent("ownership-changed", { role: "controller", controllerGeneration });
+    });
     return reply.send(controllerState(session, controllerOwner, controllerGeneration, controllerLeaseExpiresAt));
   });
   server.post("/api/v1/controller/takeover", async (request, reply) => {
     const session = (request as RequestWithSession).authSession!;
-    controllerOwner = session.id;
-    controllerGeneration += 1;
-    controllerLeaseExpiresAt = now() + CONTROLLER_LEASE_MS;
-    scheduleControllerExpiry();
-    await Promise.resolve(options.runtime?.setReadOnly?.(true)).catch(() => server.log.error("Unable to restore Read-Only Mode after controller takeover."));
-    publishEvent("ownership-changed", { role: "controller", controllerGeneration });
+    await serializeControl(async () => {
+      await restoreReadOnly();
+      clearDisconnectGrace();
+      previousController = undefined;
+      controllerOwner = session.id;
+      controllerGeneration += 1;
+      controllerLeaseExpiresAt = now() + controllerLeaseMilliseconds;
+      scheduleControllerExpiry();
+      publishEvent("ownership-changed", { role: "controller", controllerGeneration });
+    });
     return reply.send(controllerState(session, controllerOwner, controllerGeneration, controllerLeaseExpiresAt));
   });
   server.post("/api/v1/controller/renew", async (request, reply) => {
     const session = (request as RequestWithSession).authSession!;
-    if (controllerOwner !== session.id || controllerLeaseExpiresAt === undefined || now() >= controllerLeaseExpiresAt) {
-      return reply.code(409).send(errorBody("controller_generation_mismatch", "The controller lease is no longer current."));
-    }
-    controllerLeaseExpiresAt = now() + CONTROLLER_LEASE_MS;
-    scheduleControllerExpiry();
-    return reply.code(204).send();
+    const generation = Number(new URL(request.url, config.publicOrigin).searchParams.get("controllerGeneration"));
+    return serializeControl(async () => {
+      if (!Number.isSafeInteger(generation) || generation !== controllerGeneration || controllerOwner !== session.id || controllerLeaseExpiresAt === undefined || now() >= controllerLeaseExpiresAt) {
+        if (controllerOwner === session.id && controllerLeaseExpiresAt !== undefined && now() >= controllerLeaseExpiresAt) await revokeControllerState();
+        return reply.code(409).send(errorBody("controller_generation_mismatch", "The controller lease is no longer current."));
+      }
+      controllerLeaseExpiresAt = now() + controllerLeaseMilliseconds;
+      scheduleControllerExpiry();
+      return reply.code(204).send();
+    });
   });
   server.get("/api/v1/diagnostics", async () => []);
   server.get("/api/v1/events", async (request, reply) => {
@@ -421,13 +528,27 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       "Referrer-Policy": "no-referrer",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
     });
-    const client: EventClient = { response: reply.raw, queue: [], paused: false, closed: false };
+    const client: EventClient = {
+      response: reply.raw,
+      queue: [],
+      paused: false,
+      closed: false,
+      heartbeat: setInterval(() => {
+        if (client.closed || client.paused) return;
+        try {
+          client.paused = !client.response.write(": heartbeat\n\n");
+        } catch {
+          closeEventClient(client);
+        }
+      }, SSE_HEARTBEAT_MS),
+    };
+    client.heartbeat.unref();
     eventClients.add(client);
     reply.raw.on("drain", () => flushEventClient(client));
     const oldest = eventHistory[0]?.sequence;
     if (after === 0) {
       publishEvent("snapshot-required", { reason: "initial" });
-    } else if (oldest === undefined || after < oldest - 1 || after > sequence) {
+    } else if (after > sequence || (after < sequence && (oldest === undefined || after < oldest - 1))) {
       publishEvent("snapshot-required", { reason: "gap" });
     } else {
       for (const event of eventHistory) {

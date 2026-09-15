@@ -164,6 +164,7 @@
       "post": {
         "operationId": "renewControllerLease",
         "security": [{ "sessionCookie": [] }],
+        "parameters": [{ "name": "controllerGeneration", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 } }],
         "responses": {
           "204": { "description": "The current controller lease was renewed." },
           "401": { "$ref": "#/components/responses/Unauthorized" },
