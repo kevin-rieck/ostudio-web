@@ -16,8 +16,12 @@ export async function start(): Promise<void> {
       clearTimeout(timeout);
     }
   };
-  process.once("SIGTERM", () => { void shutdown(); });
-  process.once("SIGINT", () => { void shutdown(); });
+  process.once("SIGTERM", () => {
+    void shutdown();
+  });
+  process.once("SIGINT", () => {
+    void shutdown();
+  });
 }
 
 const invokedPath = process.argv[1];

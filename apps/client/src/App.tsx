@@ -11,7 +11,8 @@ export function App() {
   const [insecureDevelopment, setInsecureDevelopment] = useState(false);
 
   useEffect(() => {
-    void api.getAuthenticationSession()
+    void api
+      .getAuthenticationSession()
       .then((session) => {
         setAuthenticated(session.authenticated);
         setInsecureDevelopment(session.insecureDevelopment);
@@ -49,12 +50,18 @@ export function App() {
       <p className="eyebrow">OPC UA Studio</p>
       <h1>Web workspace ready</h1>
       <p>React is running in the browser.</p>
-      {insecureDevelopment && <p className="warning" role="status">Insecure development mode is enabled. Do not expose this server publicly.</p>}
+      {insecureDevelopment && (
+        <p className="warning" role="status">
+          Insecure development mode is enabled. Do not expose this server publicly.
+        </p>
+      )}
       {authenticated ? (
         <>
           <h2>Troubleshooting Session</h2>
           <p>Authentication succeeded. This browser is ready for OPC UA Studio.</p>
-          <button type="button" onClick={() => void logout()}>Sign out</button>
+          <button type="button" onClick={() => void logout()}>
+            Sign out
+          </button>
         </>
       ) : (
         <>
@@ -62,17 +69,32 @@ export function App() {
           <form onSubmit={login}>
             <label>
               Username
-              <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required />
+              <input
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                autoComplete="username"
+                required
+              />
             </label>
             <label>
               Admin password
-              <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required />
+              <input
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                autoComplete="current-password"
+                required
+              />
             </label>
             <button type="submit">Sign in</button>
           </form>
         </>
       )}
-      {message && <p className="error" role="alert">{message}</p>}
+      {message && (
+        <p className="error" role="alert">
+          {message}
+        </p>
+      )}
     </main>
   );
 }

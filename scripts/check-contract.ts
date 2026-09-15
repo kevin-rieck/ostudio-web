@@ -30,7 +30,8 @@ const requiredSchemas = [
   "OperationOutcome",
 ] as const;
 
-const forbiddenModelProperty = /password|cookie|privateKey|certificateContents|hostPath|mutationValue|methodInputs?|methodOutputs?/i;
+const forbiddenModelProperty =
+  /password|cookie|privateKey|certificateContents|hostPath|mutationValue|methodInputs?|methodOutputs?/i;
 const lowerCamelCase = /^[a-z][A-Za-z0-9]*$/;
 
 type JsonObject = Record<string, unknown>;
@@ -99,9 +100,18 @@ function validateFixturePayload(relativePath: string, fixture: JsonObject, kind:
     case "search-ordering": {
       const candidates = requireArray(fixture.candidates, `${relativePath}.candidates`);
       const ordered = requireArray(fixture.orderedNodeIds, `${relativePath}.orderedNodeIds`);
-      const candidateIds = candidates.map((value) => requireString(requireObject(value, `${relativePath}.candidates entry`).nodeId, `${relativePath}.candidates.nodeId`));
+      const candidateIds = candidates.map((value) =>
+        requireString(
+          requireObject(value, `${relativePath}.candidates entry`).nodeId,
+          `${relativePath}.candidates.nodeId`,
+        ),
+      );
       const orderedIds = ordered.map((value) => requireString(value, `${relativePath}.orderedNodeIds entry`));
-      if (new Set(candidateIds).size !== candidateIds.length || candidateIds.length !== orderedIds.length || candidateIds.some((id) => !orderedIds.includes(id))) {
+      if (
+        new Set(candidateIds).size !== candidateIds.length ||
+        candidateIds.length !== orderedIds.length ||
+        candidateIds.some((id) => !orderedIds.includes(id))
+      ) {
         throw new Error(`${relativePath} must order every candidate exactly once`);
       }
       return;
@@ -134,7 +144,10 @@ function validateFixturePayload(relativePath: string, fixture: JsonObject, kind:
       return;
     }
     case "timeout-classification": {
-      const deadlines = requireObject(fixture.defaultDeadlinesMilliseconds, `${relativePath}.defaultDeadlinesMilliseconds`);
+      const deadlines = requireObject(
+        fixture.defaultDeadlinesMilliseconds,
+        `${relativePath}.defaultDeadlinesMilliseconds`,
+      );
       for (const operation of ["read", "write", "methodCall"]) {
         if (typeof deadlines[operation] !== "number" || deadlines[operation] <= 0) {
           throw new Error(`${relativePath} must define a positive ${operation} deadline`);
@@ -174,7 +187,11 @@ function validateFixturePayload(relativePath: string, fixture: JsonObject, kind:
     case "transport-safety": {
       const snapshot = requireObject(fixture.snapshot, `${relativePath}.snapshot`);
       const event = requireObject(fixture.event, `${relativePath}.event`);
-      if (typeof snapshot.sequence !== "number" || typeof event.sequence !== "number" || event.sequence <= snapshot.sequence) {
+      if (
+        typeof snapshot.sequence !== "number" ||
+        typeof event.sequence !== "number" ||
+        event.sequence <= snapshot.sequence
+      ) {
         throw new Error(`${relativePath} must advance event sequence after its snapshot`);
       }
       requireString(snapshot.buildVersion, `${relativePath}.snapshot.buildVersion`);
@@ -245,7 +262,9 @@ function countSchemaReferences(value: unknown, schemaName: string): number {
   if (Array.isArray(value)) return value.reduce((count, item) => count + countSchemaReferences(item, schemaName), 0);
   if (!isObject(value)) return 0;
   const ownReference = value.$ref === `#/components/schemas/${schemaName}` ? 1 : 0;
-  return ownReference + Object.values(value).reduce((count, child) => count + countSchemaReferences(child, schemaName), 0);
+  return (
+    ownReference + Object.values(value).reduce((count, child) => count + countSchemaReferences(child, schemaName), 0)
+  );
 }
 
 function validatePasswordSchemaUsage(root: JsonObject): void {
@@ -255,7 +274,8 @@ function validatePasswordSchemaUsage(root: JsonObject): void {
     if (!isObject(pathItem)) continue;
     for (const [method, operationValue] of Object.entries(pathItem)) {
       if (!["get", "post", "put", "delete", "patch"].includes(method) || !isObject(operationValue)) continue;
-      if (isObject(operationValue.requestBody)) requestBodyReferences += countSchemaReferences(operationValue.requestBody, "LoginRequest");
+      if (isObject(operationValue.requestBody))
+        requestBodyReferences += countSchemaReferences(operationValue.requestBody, "LoginRequest");
     }
   }
   const pathReferences = countSchemaReferences(paths, "LoginRequest");
@@ -315,7 +335,14 @@ function validateOpenApi(contract: unknown): void {
   if (!isObject(challenge) || !isObject(challenge.properties)) {
     throw new Error("mutation challenge must define a model");
   }
-  for (const field of ["operationId", "challenge", "expiresAt", "controllerGeneration", "connectionGeneration", "safetyGeneration"]) {
+  for (const field of [
+    "operationId",
+    "challenge",
+    "expiresAt",
+    "controllerGeneration",
+    "connectionGeneration",
+    "safetyGeneration",
+  ]) {
     if (!(field in challenge.properties)) {
       throw new Error(`mutation challenge is missing ${field}`);
     }
@@ -352,7 +379,10 @@ export function checkContract(): ContractCheckResult {
   }
 
   const fixtureKinds = [...kinds].sort();
-  if (fixtureKinds.length !== expectedFixtureKinds.length || fixtureKinds.some((kind, index) => kind !== expectedFixtureKinds[index])) {
+  if (
+    fixtureKinds.length !== expectedFixtureKinds.length ||
+    fixtureKinds.some((kind, index) => kind !== expectedFixtureKinds[index])
+  ) {
     throw new Error(`conformance kinds must be exactly ${expectedFixtureKinds.join(", ")}`);
   }
   return { fixtureCount };
