@@ -10,6 +10,7 @@ export default defineConfig({
   },
   webServer: {
     command: "npm run build && npm run start --workspace @ostudio/server",
+    env: { OSTUDIO_INSECURE_DEV: "true" },
     url: "http://127.0.0.1:8080/health/live",
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
