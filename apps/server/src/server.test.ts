@@ -35,8 +35,11 @@ describe("server routes", () => {
   it("authenticates the fixed admin with a secure HttpOnly session cookie", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "ostudio-auth-"));
     const passwordFile = path.join(directory, "admin-password");
+    const assetsDirectory = await mkdtemp(path.join(os.tmpdir(), "ostudio-assets-"));
     await writeFile(passwordFile, "correct horse battery staple");
+    await writeFile(path.join(assetsDirectory, "index.html"), "<!doctype html>");
     server = await createServer({
+      assetsDirectory,
       env: { NODE_ENV: "production", OSTUDIO_PUBLIC_ORIGIN: "https://studio.example", OPCUA_STUDIO_ADMIN_PASSWORD_FILE: passwordFile },
     });
 
