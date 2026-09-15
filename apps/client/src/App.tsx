@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ApiClientError, createApiClient, type Snapshot } from "@ostudio/contracts";
 
 const api = createApiClient();
@@ -11,6 +11,7 @@ export function App() {
   const [insecureDevelopment, setInsecureDevelopment] = useState(false);
   const [controllerRole, setControllerRole] = useState<"controller" | "observer">("observer");
   const [snapshot, setSnapshot] = useState<Snapshot>();
+  const controllerControls = useRef<{ setGeneration(generation: number): void; startRenewal(): void } | undefined>(undefined);
 
   useEffect(() => {
     void api.getAuthenticationSession()
@@ -62,6 +63,10 @@ export function App() {
         });
       }, 5_000);
     };
+    controllerControls.current = {
+      setGeneration: (generation) => { controllerGeneration = generation; },
+      startRenewal,
+    };
     const connectEvents = async (): Promise<void> => {
       if (stopped || connecting) return;
       connecting = true;
@@ -107,6 +112,7 @@ export function App() {
       source?.close();
       stopRenewal();
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      controllerControls.current = undefined;
     };
   }, [authenticated]);
 
@@ -128,7 +134,9 @@ export function App() {
     setMessage(undefined);
     try {
       const controller = await api.takeOverController();
+      controllerControls.current?.setGeneration(controller.controllerGeneration);
       setControllerRole(controller.role);
+      if (controller.role === "controller") controllerControls.current?.startRenewal();
     } catch (error) {
       setMessage(error instanceof ApiClientError ? error.message : "Control transfer failed.");
     }

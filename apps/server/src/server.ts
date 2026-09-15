@@ -196,7 +196,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   if (!Number.isSafeInteger(controllerLeaseMilliseconds) || controllerLeaseMilliseconds <= 0) throw new Error("controllerLeaseMilliseconds must be a positive integer.");
   if (!Number.isSafeInteger(controllerDisconnectGraceMilliseconds) || controllerDisconnectGraceMilliseconds <= 0) throw new Error("controllerDisconnectGraceMilliseconds must be a positive integer.");
   let controllerOwner: string | undefined;
-  let previousController: string | undefined;
+  let recoverableControllerSessionId: string | undefined;
   let controllerGeneration = 0;
   let controllerLeaseExpiresAt: number | undefined;
   let controllerExpiryTimer: unknown;
@@ -280,7 +280,8 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   const disconnectAfterGrace = (): void => {
     disconnectGraceTimer = undefined;
     void serializeControl(async () => {
-      if (shuttingDown || controllerOwner !== undefined || previousController === undefined) return;
+      if (shuttingDown || controllerOwner !== undefined || recoverableControllerSessionId === undefined) return;
+      recoverableControllerSessionId = undefined;
       const disconnect = options.runtime?.disconnect ?? options.runtime?.close;
       if (!disconnect) return;
       try {
@@ -296,14 +297,24 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   };
   const revokeControllerState = async (): Promise<void> => {
     if (controllerOwner === undefined) return;
-    await restoreReadOnly();
-    previousController = controllerOwner;
+    recoverableControllerSessionId = controllerOwner;
     controllerOwner = undefined;
     controllerLeaseExpiresAt = undefined;
+    if (controllerExpiryTimer !== undefined) timers.clearTimeout(controllerExpiryTimer);
     controllerExpiryTimer = undefined;
     controllerGeneration += 1;
     scheduleDisconnectGrace();
     publishEvent("ownership-changed", { role: "observer", controllerGeneration });
+    await restoreReadOnly();
+  };
+  const grantController = (sessionId: string, generationAlreadyChanged = false): void => {
+    recoverableControllerSessionId = undefined;
+    clearDisconnectGrace();
+    controllerOwner = sessionId;
+    if (!generationAlreadyChanged) controllerGeneration += 1;
+    controllerLeaseExpiresAt = now() + controllerLeaseMilliseconds;
+    scheduleControllerExpiry();
+    publishEvent("ownership-changed", { role: "controller", controllerGeneration });
   };
   const revokeController = (): Promise<void> => serializeControl(revokeControllerState);
   const expireController = (): Promise<void> => serializeControl(async () => {
@@ -331,7 +342,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       controllerExpiryTimer = undefined;
       clearDisconnectGrace();
       controllerOwner = undefined;
-      previousController = undefined;
+      recoverableControllerSessionId = undefined;
       controllerLeaseExpiresAt = undefined;
       controllerGeneration += 1;
       await serializeControl(restoreReadOnly);
@@ -422,16 +433,19 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   server.post("/api/v1/auth/logout", async (request, reply) => {
     const sessionId = (request as RequestWithSession).authSession?.id;
     await serializeControl(async () => {
-      if (sessionId !== controllerOwner) return;
-      await revokeControllerState();
-      clearDisconnectGrace();
-      previousController = undefined;
-      const disconnect = options.runtime?.disconnect ?? options.runtime?.close;
-      if (disconnect) {
-        try {
-          await disconnect();
-        } catch {
-          server.log.error("Unable to disconnect the runtime after logout.");
+      try {
+        if (sessionId === controllerOwner) await revokeControllerState();
+        else await restoreReadOnly();
+      } finally {
+        clearDisconnectGrace();
+        recoverableControllerSessionId = undefined;
+        const disconnect = options.runtime?.disconnect ?? options.runtime?.close;
+        if (disconnect) {
+          try {
+            await disconnect();
+          } catch {
+            server.log.error("Unable to disconnect the runtime after logout.");
+          }
         }
       }
     });
@@ -470,30 +484,19 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
         }
         return;
       }
-      if (previousController !== undefined && previousController !== session.id) return;
-      const recovering = previousController === session.id;
-      if (recovering) await restoreReadOnly();
-      previousController = undefined;
-      clearDisconnectGrace();
-      controllerOwner = session.id;
-      controllerGeneration += 1;
-      controllerLeaseExpiresAt = now() + controllerLeaseMilliseconds;
-      scheduleControllerExpiry();
-      publishEvent("ownership-changed", { role: "controller", controllerGeneration });
+      if (recoverableControllerSessionId !== undefined && recoverableControllerSessionId !== session.id) return;
+      if (recoverableControllerSessionId === session.id) await restoreReadOnly();
+      grantController(session.id);
     });
     return reply.send(controllerState(session, controllerOwner, controllerGeneration, controllerLeaseExpiresAt));
   });
   server.post("/api/v1/controller/takeover", async (request, reply) => {
     const session = (request as RequestWithSession).authSession!;
     await serializeControl(async () => {
-      await restoreReadOnly();
-      clearDisconnectGrace();
-      previousController = undefined;
-      controllerOwner = session.id;
-      controllerGeneration += 1;
-      controllerLeaseExpiresAt = now() + controllerLeaseMilliseconds;
-      scheduleControllerExpiry();
-      publishEvent("ownership-changed", { role: "controller", controllerGeneration });
+      const hadController = controllerOwner !== undefined;
+      if (hadController) await revokeControllerState();
+      else await restoreReadOnly();
+      grantController(session.id, hadController);
     });
     return reply.send(controllerState(session, controllerOwner, controllerGeneration, controllerLeaseExpiresAt));
   });
