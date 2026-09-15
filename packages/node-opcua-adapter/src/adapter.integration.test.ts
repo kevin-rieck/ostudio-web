@@ -1,9 +1,4 @@
-import {
-  DataType,
-  StatusCodes,
-  Variant,
-  VariantArrayType,
-} from "node-opcua";
+import { DataType, StatusCodes, Variant, VariantArrayType } from "node-opcua";
 import type { UAMethod, UAVariable } from "node-opcua-address-space";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { OpcUaClient, OpcUaSubscription } from "@ostudio/application";
@@ -105,7 +100,12 @@ beforeAll(async () => {
   method.bindMethod((inputArguments, _context, callback) => {
     callback(null, {
       statusCode: StatusCodes.Good,
-      outputArguments: [new Variant({ dataType: DataType.Int32, value: Number(inputArguments[0]?.value) + Number(inputArguments[1]?.value) })],
+      outputArguments: [
+        new Variant({
+          dataType: DataType.Int32,
+          value: Number(inputArguments[0]?.value) + Number(inputArguments[1]?.value),
+        }),
+      ],
     });
   });
   delayedMethod = namespace.addMethod(folder, {
@@ -142,16 +142,20 @@ afterAll(async () => {
 
 describe("production node-opcua adapter", () => {
   it("rejects an unbounded per-response browse reference override", () => {
-    expect(() => createNodeOpcuaAdapter({
-      applicationName: "OPC UA Studio adapter test",
-      applicationUri: "urn:ostudio:adapter-test",
-      maxReferencesPerNode: 0,
-    })).toThrow();
+    expect(() =>
+      createNodeOpcuaAdapter({
+        applicationName: "OPC UA Studio adapter test",
+        applicationUri: "urn:ostudio:adapter-test",
+        maxReferencesPerNode: 0,
+      }),
+    ).toThrow();
   });
 
   it("discovers, connects, browses with a bound, reads, writes, inspects, calls, and disconnects", async () => {
     const discovery = await adapter.discover({ endpointUrl });
-    expect(discovery.endpoints.some((endpoint) => endpoint.endpointUrl === endpointUrl && endpoint.securityMode === "None")).toBe(true);
+    expect(
+      discovery.endpoints.some((endpoint) => endpoint.endpointUrl === endpointUrl && endpoint.securityMode === "None"),
+    ).toBe(true);
 
     const session = await adapter.connect({ endpointUrl, securityMode: "None" });
     try {
@@ -161,7 +165,11 @@ describe("production node-opcua adapter", () => {
       );
       expect(browse.requests).toBe(2);
       expect(browse.truncated).toBe(true);
-      const completeBrowse = await session.browse({ nodeId: "ns=1;s=AdapterFixture", maxRequests: 10, maxReferencesPerNode: 1 });
+      const completeBrowse = await session.browse({
+        nodeId: "ns=1;s=AdapterFixture",
+        maxRequests: 10,
+        maxReferencesPerNode: 1,
+      });
       expect(completeBrowse.references.map((reference) => reference.nodeId)).toContain(method.nodeId.toString());
 
       const initial = await session.read({ nodeId: writableVariable.nodeId.toString() });
@@ -178,24 +186,24 @@ describe("production node-opcua adapter", () => {
         },
       );
       const write = await session.write({
-      nodeId: writableVariable.nodeId.toString(),
-      value: { dataType: "Int32", arrayType: "Scalar", value: 7 },
-    });
+        nodeId: writableVariable.nodeId.toString(),
+        value: { dataType: "Int32", arrayType: "Scalar", value: 7 },
+      });
       expect(write.outcome).toBe("succeeded");
       await expect(subscriptionValue).resolves.toBe(7);
       await subscription!.unsubscribe();
 
       const definition = await session.inspectMethod(method.nodeId.toString());
-    expect(definition.inputArguments.map((argument) => argument.name)).toEqual(["left", "right"]);
-    const call = await session.call({
-      objectId: "ns=1;s=AdapterFixture",
-      methodId: method.nodeId.toString(),
-      inputArguments: [
-        { dataType: "Int32", arrayType: "Scalar", value: 2 },
-        { dataType: "Int32", arrayType: "Scalar", value: 3 },
-      ],
-      expectedDefinition: definition,
-    });
+      expect(definition.inputArguments.map((argument) => argument.name)).toEqual(["left", "right"]);
+      const call = await session.call({
+        objectId: "ns=1;s=AdapterFixture",
+        methodId: method.nodeId.toString(),
+        inputArguments: [
+          { dataType: "Int32", arrayType: "Scalar", value: 2 },
+          { dataType: "Int32", arrayType: "Scalar", value: 3 },
+        ],
+        expectedDefinition: definition,
+      });
       expect(call.outcome).toBe("succeeded");
       expect(call.outputArguments?.[0]?.value).toBe(5);
     } finally {
@@ -209,17 +217,24 @@ describe("production node-opcua adapter", () => {
     try {
       for (const { variable, dataType, initial, updated } of scalarVariables) {
         const nodeId = variable.nodeId.toString();
-        const transport = (value: unknown) => dataType === DataType.DateTime && value instanceof Date
-          ? value.toISOString()
-          : dataType === DataType.ByteString && Buffer.isBuffer(value)
-            ? value.toString("base64")
-            : value;
-        await expect(session.read({ nodeId })).resolves.toMatchObject({ dataValue: { value: { value: transport(initial) } } });
-        await expect(session.write({
-          nodeId,
-          value: { dataType: DataType[dataType] as never, arrayType: "Scalar", value: transport(updated) as never },
-        })).resolves.toMatchObject({ outcome: "succeeded" });
-        await expect(session.read({ nodeId })).resolves.toMatchObject({ dataValue: { value: { value: transport(updated) } } });
+        const transport = (value: unknown) =>
+          dataType === DataType.DateTime && value instanceof Date
+            ? value.toISOString()
+            : dataType === DataType.ByteString && Buffer.isBuffer(value)
+              ? value.toString("base64")
+              : value;
+        await expect(session.read({ nodeId })).resolves.toMatchObject({
+          dataValue: { value: { value: transport(initial) } },
+        });
+        await expect(
+          session.write({
+            nodeId,
+            value: { dataType: DataType[dataType] as never, arrayType: "Scalar", value: transport(updated) as never },
+          }),
+        ).resolves.toMatchObject({ outcome: "succeeded" });
+        await expect(session.read({ nodeId })).resolves.toMatchObject({
+          dataValue: { value: { value: transport(updated) } },
+        });
       }
     } finally {
       await session.close();
@@ -250,7 +265,8 @@ describe("production node-opcua adapter", () => {
   it("selects a secure endpoint only with its exact pinned certificate fingerprint", async () => {
     const discovery = await adapter.discover({ endpointUrl });
     const secureEndpoint = discovery.endpoints.find(
-      (candidate) => candidate.securityMode === "SignAndEncrypt" && candidate.securityPolicyUri.endsWith("Basic256Sha256"),
+      (candidate) =>
+        candidate.securityMode === "SignAndEncrypt" && candidate.securityPolicyUri.endsWith("Basic256Sha256"),
     );
     expect(secureEndpoint?.serverCertificateFingerprint).toMatch(/^sha256:[0-9a-f]{64}$/);
     const session = await adapter.connect({

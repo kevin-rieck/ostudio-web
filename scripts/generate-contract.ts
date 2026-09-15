@@ -26,7 +26,8 @@ function stringLiteral(value: unknown): string {
 function schemaType(schema: Schema): string {
   const reference = refName(schema);
   if (reference) return reference;
-  if (Array.isArray(schema.oneOf)) return schema.oneOf.map((item) => schemaType(isObject(item) ? item : {})).join(" | ");
+  if (Array.isArray(schema.oneOf))
+    return schema.oneOf.map((item) => schemaType(isObject(item) ? item : {})).join(" | ");
   if (schema.type === "array") {
     const itemType = isObject(schema.items) ? schemaType(schema.items) : "unknown";
     return itemType.includes(" | ") ? `(${itemType})[]` : `${itemType}[]`;
@@ -43,7 +44,9 @@ function renderSchema(name: string, schema: Schema): string {
   if (schema.type !== "object" || !isObject(schema.properties)) {
     return `export type ${name} = ${schemaType(schema)};`;
   }
-  const required = new Set(Array.isArray(schema.required) ? schema.required.filter((value): value is string => typeof value === "string") : []);
+  const required = new Set(
+    Array.isArray(schema.required) ? schema.required.filter((value): value is string => typeof value === "string") : [],
+  );
   const fields = Object.entries(schema.properties).map(([field, value]) => {
     const type = schemaType(isObject(value) ? value : {});
     return `  ${field}${required.has(field) ? "" : "?"}: ${type};`;
@@ -65,10 +68,18 @@ function operationResultType(operation: JsonObject): string {
 
 function renderClient(contract: JsonObject): string {
   const paths = isObject(contract.paths) ? contract.paths : {};
-  const schemas = isObject(contract.components) && isObject(contract.components.schemas) ? contract.components.schemas : {};
+  const schemas =
+    isObject(contract.components) && isObject(contract.components.schemas) ? contract.components.schemas : {};
   const loginSchema = schemas.LoginRequest ?? {};
   type ClientParameter = { name: string; location: "path" | "query"; type: string; required: boolean };
-  type ClientOperation = { name: string; method: string; route: string; requestType?: string; resultType: string; parameters: ClientParameter[] };
+  type ClientOperation = {
+    name: string;
+    method: string;
+    route: string;
+    requestType?: string;
+    resultType: string;
+    parameters: ClientParameter[];
+  };
   const operations: ClientOperation[] = [];
   for (const [route, pathItemValue] of Object.entries(paths)) {
     if (!isObject(pathItemValue)) continue;
@@ -82,10 +93,27 @@ function renderClient(contract: JsonObject): string {
       const requestSchema = json && isObject(json.schema) ? refName(json.schema) : undefined;
       const parameters: ClientParameter[] = [];
       for (const parameterValue of Array.isArray(operationValue.parameters) ? operationValue.parameters : []) {
-        if (!isObject(parameterValue) || typeof parameterValue.name !== "string" || (parameterValue.in !== "path" && parameterValue.in !== "query")) continue;
-        parameters.push({ name: parameterValue.name, location: parameterValue.in, type: isObject(parameterValue.schema) ? schemaType(parameterValue.schema) : "string", required: parameterValue.required === true });
+        if (
+          !isObject(parameterValue) ||
+          typeof parameterValue.name !== "string" ||
+          (parameterValue.in !== "path" && parameterValue.in !== "query")
+        )
+          continue;
+        parameters.push({
+          name: parameterValue.name,
+          location: parameterValue.in,
+          type: isObject(parameterValue.schema) ? schemaType(parameterValue.schema) : "string",
+          required: parameterValue.required === true,
+        });
       }
-      operations.push({ name, method: method.toUpperCase(), route, requestType: requestSchema, resultType: operationResultType(operationValue), parameters });
+      operations.push({
+        name,
+        method: method.toUpperCase(),
+        route,
+        requestType: requestSchema,
+        resultType: operationResultType(operationValue),
+        parameters,
+      });
     }
   }
   const methods = operations.map(({ name, method, route, requestType, resultType, parameters }) => {
@@ -97,8 +125,15 @@ function renderClient(contract: JsonObject): string {
       ...queryParameters.map((parameter) => `${parameter.name}${parameter.required ? "" : "?"}: ${parameter.type}`),
     ];
     const returnType = resultType === "void" ? "Promise<void>" : `Promise<${resultType}>`;
-    const pathExpression = pathParameters.reduce((expression, parameter) => `${expression}.replace("{${parameter.name}}", encodeURIComponent(String(${parameter.name})))`, JSON.stringify(route));
-    const querySetup = queryParameters.length === 0 ? "" : `\n    const query = new URLSearchParams();\n${queryParameters.map((parameter) => `    if (${parameter.name} !== undefined) query.set("${parameter.name}", String(${parameter.name}));`).join("\n")}\n    const route = ${pathExpression} + (query.toString() ? "?" + query.toString() : "");`;
+    const pathExpression = pathParameters.reduce(
+      (expression, parameter) =>
+        `${expression}.replace("{${parameter.name}}", encodeURIComponent(String(${parameter.name})))`,
+      JSON.stringify(route),
+    );
+    const querySetup =
+      queryParameters.length === 0
+        ? ""
+        : `\n    const query = new URLSearchParams();\n${queryParameters.map((parameter) => `    if (${parameter.name} !== undefined) query.set("${parameter.name}", String(${parameter.name}));`).join("\n")}\n    const route = ${pathExpression} + (query.toString() ? "?" + query.toString() : "");`;
     const routeArgument = queryParameters.length === 0 ? pathExpression : "route";
     const body = requestType ? ", JSON.stringify(request)" : "";
     return `  ${name}(${argumentsList.join(", ")}): ${returnType} {${querySetup}\n    return send<${resultType === "void" ? "void" : resultType}>("${method}", ${routeArgument}${body});\n  }`;
@@ -172,8 +207,11 @@ function isApiError(value: unknown): value is ApiError {
 
 export function generateContractSource(): string {
   const contract = JSON.parse(readFileSync(contractPath, "utf8")) as JsonObject;
-  const schemasRoot = isObject(contract.components) && isObject(contract.components.schemas) ? contract.components.schemas : {};
-  const models = Object.entries(schemasRoot).map(([name, schema]) => renderSchema(name, isObject(schema) ? schema : {}));
+  const schemasRoot =
+    isObject(contract.components) && isObject(contract.components.schemas) ? contract.components.schemas : {};
+  const models = Object.entries(schemasRoot).map(([name, schema]) =>
+    renderSchema(name, isObject(schema) ? schema : {}),
+  );
   return `// Generated by scripts/generate-contract.ts from api/openapi.yaml. Do not edit.\n\n${models.join("\n\n")}\n${renderClient(contract)}`;
 }
 

@@ -3,7 +3,15 @@ import diagnosticFixture from "../../../testdata/conformance/diagnostic-redactio
 import searchFixture from "../../../testdata/conformance/search-ordering.json";
 import reversedSearchFixture from "../../../testdata/conformance/search-reversed-discovery.json";
 import savedConnectionFixture from "../../../testdata/conformance/saved-connection-secret-stripping.json";
-import { createApplication, type ApplicationEvent, type OpcUaClient, type OpcUaDataValue, type OpcUaReadRequest, type OpcUaSession, type SavedConnectionStore } from "./index.js";
+import {
+  createApplication,
+  type ApplicationEvent,
+  type OpcUaClient,
+  type OpcUaDataValue,
+  type OpcUaReadRequest,
+  type OpcUaSession,
+  type SavedConnectionStore,
+} from "./index.js";
 
 const store: SavedConnectionStore = {
   list: async () => [],
@@ -13,17 +21,29 @@ const store: SavedConnectionStore = {
 function client(): OpcUaClient {
   return {
     discover: async () => ({ servers: [], endpoints: [] }),
-    connect: async () => ({
-      browse: async () => ({ nodeId: "i=84", references: [], status: { name: "Good", value: 0 }, requests: 1, truncated: false }),
-      read: async (request) => Array.isArray(request)
-        ? request.map((item) => ({ ...item, attributeId: item.attributeId ?? 13, dataValue: { status: { name: "Good", value: 0 } } }))
-        : { ...request, attributeId: request.attributeId ?? 13, dataValue: { status: { name: "Good", value: 0 } } },
-      subscribe: async () => ({ unsubscribe: async () => undefined }),
-      write: async () => ({ outcome: "succeeded" }),
-      inspectMethod: async () => ({ inputArguments: [], outputArguments: [] }),
-      call: async () => ({ outcome: "succeeded" }),
-      close: async () => undefined,
-    } as OpcUaSession),
+    connect: async () =>
+      ({
+        browse: async () => ({
+          nodeId: "i=84",
+          references: [],
+          status: { name: "Good", value: 0 },
+          requests: 1,
+          truncated: false,
+        }),
+        read: async (request) =>
+          Array.isArray(request)
+            ? request.map((item) => ({
+                ...item,
+                attributeId: item.attributeId ?? 13,
+                dataValue: { status: { name: "Good", value: 0 } },
+              }))
+            : { ...request, attributeId: request.attributeId ?? 13, dataValue: { status: { name: "Good", value: 0 } } },
+        subscribe: async () => ({ unsubscribe: async () => undefined }),
+        write: async () => ({ outcome: "succeeded" }),
+        inspectMethod: async () => ({ inputArguments: [], outputArguments: [] }),
+        call: async () => ({ outcome: "succeeded" }),
+        close: async () => undefined,
+      }) as OpcUaSession,
     onConnectionLost: () => () => undefined,
     disconnect: async () => undefined,
   };
@@ -51,7 +71,12 @@ describe("application facade", () => {
       connection: { state: "connected", endpointUrl: "opc.tcp://plc:4840" },
       safety: { readOnly: true, safetyGeneration: 2 },
     });
-    expect(events.map((event) => event.type)).toEqual(["connection-changed", "search-changed", "connection-changed", "safety-changed"]);
+    expect(events.map((event) => event.type)).toEqual([
+      "connection-changed",
+      "search-changed",
+      "connection-changed",
+      "safety-changed",
+    ]);
   });
 
   it("ranks explicit Address Space results before shallow results stably", async () => {
@@ -83,30 +108,49 @@ describe("application facade", () => {
       return application.search(reversedSearchFixture.query);
     };
 
-    for (const result of [await run(reversedSearchFixture.arrivals), await run(reversedSearchFixture.reversedArrivals)]) {
-      expect(result.results).toMatchObject([{
-        nodeId: "ns=2;s=shared",
-        displayName: "pressure sensor",
-        browseName: "pressure",
-        explicitBrowse: true,
-        distance: 2,
-      }]);
+    for (const result of [
+      await run(reversedSearchFixture.arrivals),
+      await run(reversedSearchFixture.reversedArrivals),
+    ]) {
+      expect(result.results).toMatchObject([
+        {
+          nodeId: "ns=2;s=shared",
+          displayName: "pressure sensor",
+          browseName: "pressure",
+          explicitBrowse: true,
+          distance: 2,
+        },
+      ]);
     }
   });
 
   it("assigns a relative distance to explicitly browsed Address Space results", async () => {
     let browseCalls = 0;
     const opcua = client();
-    opcua.connect = async () => ({ ...await client().connect({ endpointUrl: "opc.tcp://plc:4840" }), browse: async (request) => {
-      browseCalls += 1;
-      return {
-        nodeId: request.nodeId,
-        references: browseCalls === 2 ? [{ nodeId: "ns=2;s=explicit", browseName: { namespaceIndex: 2, name: "pressure" }, displayName: { text: "pressure" }, nodeClass: "Variable", isForward: true }] : [],
-        status: { name: "Good", value: 0 },
-        requests: 1,
-        truncated: false,
-      };
-    } });
+    opcua.connect = async () => ({
+      ...(await client().connect({ endpointUrl: "opc.tcp://plc:4840" })),
+      browse: async (request) => {
+        browseCalls += 1;
+        return {
+          nodeId: request.nodeId,
+          references:
+            browseCalls === 2
+              ? [
+                  {
+                    nodeId: "ns=2;s=explicit",
+                    browseName: { namespaceIndex: 2, name: "pressure" },
+                    displayName: { text: "pressure" },
+                    nodeClass: "Variable",
+                    isForward: true,
+                  },
+                ]
+              : [],
+          status: { name: "Good", value: 0 },
+          requests: 1,
+          truncated: false,
+        };
+      },
+    });
     const application = createApplication({
       clientFactory: () => opcua,
       savedConnections: store,
@@ -125,7 +169,12 @@ describe("application facade", () => {
     const saved: unknown[] = [];
     const application = createApplication({
       clientFactory: client,
-      savedConnections: { list: async () => [], save: async (value) => { saved.push(value); } },
+      savedConnections: {
+        list: async () => [],
+        save: async (value) => {
+          saved.push(value);
+        },
+      },
       clock: { now: () => new Date("2026-01-01T00:00:00.000Z") },
       events: { publish: () => undefined },
     });
@@ -164,14 +213,18 @@ describe("application facade", () => {
     const application = createApplication({
       clientFactory: () => opcua,
       savedConnections: {
-        list: async () => [{
-          id: "stored",
-          name: "Stored",
-          endpoint: "opc.tcp://stored:stored-secret@plc.example:4840/path",
-          securityPolicy: "None",
-          securityMode: "None",
-        }],
-        save: async (connection) => { saved.push(connection); },
+        list: async () => [
+          {
+            id: "stored",
+            name: "Stored",
+            endpoint: "opc.tcp://stored:stored-secret@plc.example:4840/path",
+            securityPolicy: "None",
+            securityMode: "None",
+          },
+        ],
+        save: async (connection) => {
+          saved.push(connection);
+        },
       },
       clock: { now: () => new Date("2026-01-01T00:00:00.000Z") },
       events: { publish: (event) => events.push(event) },
@@ -192,12 +245,16 @@ describe("application facade", () => {
     expect(application.snapshot().connection.endpointUrl).toBe("opc.tcp://plc.example:4840/path");
     expect(listed[0]?.endpoint).toBe("opc.tcp://plc.example:4840/path");
     expect(saved[0]).toMatchObject({ endpoint: "opc.tcp://plc.example:4840/path" });
-    expect(JSON.stringify({ snapshot: application.snapshot(), events, listed, saved })).not.toMatch(/connect-secret|stored-secret|save-secret/);
+    expect(JSON.stringify({ snapshot: application.snapshot(), events, listed, saved })).not.toMatch(
+      /connect-secret|stored-secret|save-secret/,
+    );
   });
 
   it("drops shallow-browse results from an old connection and resets its queue", async () => {
     let releaseOldBrowse!: () => void;
-    const oldBrowse = new Promise<void>((resolve) => { releaseOldBrowse = resolve; });
+    const oldBrowse = new Promise<void>((resolve) => {
+      releaseOldBrowse = resolve;
+    });
     let connections = 0;
     const browsed: string[] = [];
     const opcua = client();
@@ -209,7 +266,13 @@ describe("application facade", () => {
         browse: async (browseRequest) => {
           browsed.push(browseRequest.nodeId);
           if (connections === 1) await oldBrowse;
-          return { nodeId: browseRequest.nodeId, references: [], status: { name: "Good", value: 0 }, requests: 1, truncated: false };
+          return {
+            nodeId: browseRequest.nodeId,
+            references: [],
+            status: { name: "Good", value: 0 },
+            requests: 1,
+            truncated: false,
+          };
         },
       };
     };
@@ -237,16 +300,30 @@ describe("application facade", () => {
     let now = 0;
     const browsed: string[] = [];
     const opcua = client();
-    opcua.connect = async () => ({ ...await client().connect({ endpointUrl: "opc.tcp://plc:4840" }), browse: async (request) => {
-      browsed.push(request.nodeId);
-      return {
-        nodeId: request.nodeId,
-        references: request.nodeId === "i=85" ? [{ nodeId: "ns=2;s=child", browseName: { namespaceIndex: 2, name: "pressure" }, displayName: { text: "pressure" }, nodeClass: "Object", isForward: true }] : [],
-        status: { name: "Good", value: 0 },
-        requests: 1,
-        truncated: false,
-      };
-    } });
+    opcua.connect = async () => ({
+      ...(await client().connect({ endpointUrl: "opc.tcp://plc:4840" })),
+      browse: async (request) => {
+        browsed.push(request.nodeId);
+        return {
+          nodeId: request.nodeId,
+          references:
+            request.nodeId === "i=85"
+              ? [
+                  {
+                    nodeId: "ns=2;s=child",
+                    browseName: { namespaceIndex: 2, name: "pressure" },
+                    displayName: { text: "pressure" },
+                    nodeClass: "Object",
+                    isForward: true,
+                  },
+                ]
+              : [],
+          status: { name: "Good", value: 0 },
+          requests: 1,
+          truncated: false,
+        };
+      },
+    });
     const application = createApplication({
       clientFactory: () => opcua,
       savedConnections: store,
@@ -266,17 +343,37 @@ describe("application facade", () => {
   it("preserves shallow-browse traversal distance in deterministic search ordering", async () => {
     let now = 0;
     const opcua = client();
-    opcua.connect = async () => ({ ...await client().connect({ endpointUrl: "opc.tcp://plc:4840" }), browse: async (request) => ({
-      nodeId: request.nodeId,
-      references: request.nodeId === "i=85"
-        ? [{ nodeId: "ns=2;s=near", browseName: { namespaceIndex: 2, name: "pressure" }, displayName: { text: "near" }, nodeClass: "Object", isForward: true }]
-        : request.nodeId === "ns=2;s=near"
-          ? [{ nodeId: "ns=2;s=far", browseName: { namespaceIndex: 2, name: "pressure" }, displayName: { text: "far" }, nodeClass: "Object", isForward: true }]
-          : [],
-      status: { name: "Good", value: 0 },
-      requests: 1,
-      truncated: false,
-    }) });
+    opcua.connect = async () => ({
+      ...(await client().connect({ endpointUrl: "opc.tcp://plc:4840" })),
+      browse: async (request) => ({
+        nodeId: request.nodeId,
+        references:
+          request.nodeId === "i=85"
+            ? [
+                {
+                  nodeId: "ns=2;s=near",
+                  browseName: { namespaceIndex: 2, name: "pressure" },
+                  displayName: { text: "near" },
+                  nodeClass: "Object",
+                  isForward: true,
+                },
+              ]
+            : request.nodeId === "ns=2;s=near"
+              ? [
+                  {
+                    nodeId: "ns=2;s=far",
+                    browseName: { namespaceIndex: 2, name: "pressure" },
+                    displayName: { text: "far" },
+                    nodeClass: "Object",
+                    isForward: true,
+                  },
+                ]
+              : [],
+        status: { name: "Good", value: 0 },
+        requests: 1,
+        truncated: false,
+      }),
+    });
     const application = createApplication({
       clientFactory: () => opcua,
       savedConnections: store,
@@ -300,24 +397,44 @@ describe("application facade", () => {
     let browseMaxRequests: number | undefined;
     const opcua = client();
     const browseNodeIds: string[] = [];
-    opcua.connect = async () => ({ ...await client().connect({ endpointUrl: "opc.tcp://plc:4840" }), browse: async (request) => {
-      browseCalls += 1;
-      browseNodeIds.push(request.nodeId);
-      browseMaxRequests = request.maxRequests;
-      return {
-        nodeId: request.nodeId,
-        references: request.nodeId === "i=85" ? [{ nodeId: "ns=2;s=child", browseName: { namespaceIndex: 2, name: "child" }, displayName: { text: "child" }, nodeClass: "Object", isForward: true }] : [],
-        status: { name: "Good", value: 0 },
-        requests: 1,
-        truncated: false,
-      };
-    } });
+    opcua.connect = async () => ({
+      ...(await client().connect({ endpointUrl: "opc.tcp://plc:4840" })),
+      browse: async (request) => {
+        browseCalls += 1;
+        browseNodeIds.push(request.nodeId);
+        browseMaxRequests = request.maxRequests;
+        return {
+          nodeId: request.nodeId,
+          references:
+            request.nodeId === "i=85"
+              ? [
+                  {
+                    nodeId: "ns=2;s=child",
+                    browseName: { namespaceIndex: 2, name: "child" },
+                    displayName: { text: "child" },
+                    nodeClass: "Object",
+                    isForward: true,
+                  },
+                ]
+              : [],
+          status: { name: "Good", value: 0 },
+          requests: 1,
+          truncated: false,
+        };
+      },
+    });
     let now = 0;
     const application = createApplication({
       clientFactory: () => opcua,
       savedConnections: store,
       clock: { now: () => new Date(now) },
-      timers: { setTimeout: (callback) => { callback(); return 1; }, clearTimeout: () => undefined },
+      timers: {
+        setTimeout: (callback) => {
+          callback();
+          return 1;
+        },
+        clearTimeout: () => undefined,
+      },
       events: { publish: () => undefined },
     });
     await application.connect({ endpointUrl: "opc.tcp://plc:4840" });
@@ -334,15 +451,26 @@ describe("application facade", () => {
   it("records only bounded, redacted diagnostics for connection failures", async () => {
     const messages: Array<{ message: string; details?: Record<string, unknown> }> = [];
     const application = createApplication({
-      clientFactory: () => ({ ...client(), connect: async () => { throw new Error("password=must-not-survive C:\\certs\\client.key"); } }),
+      clientFactory: () => ({
+        ...client(),
+        connect: async () => {
+          throw new Error("password=must-not-survive C:\\certs\\client.key");
+        },
+      }),
       savedConnections: store,
       clock: { now: () => new Date("2026-01-01T00:00:00.000Z") },
-      logger: { info: (message, details) => messages.push({ message, details }), error: (message, details) => messages.push({ message, details }) },
+      logger: {
+        info: (message, details) => messages.push({ message, details }),
+        error: (message, details) => messages.push({ message, details }),
+      },
       events: { publish: () => undefined },
     });
     await expect(application.connect({ endpointUrl: "opc.tcp://admin:secret@plc.example:4840" })).rejects.toThrow();
     const diagnostic = application.snapshot().diagnostics[0];
-    expect(diagnostic).toMatchObject({ endpoint: diagnosticFixture.safeRecord.endpoint, outcome: diagnosticFixture.safeRecord.outcome });
+    expect(diagnostic).toMatchObject({
+      endpoint: diagnosticFixture.safeRecord.endpoint,
+      outcome: diagnosticFixture.safeRecord.outcome,
+    });
     for (const field of diagnosticFixture.removedFields) expect(diagnostic).not.toHaveProperty(field);
     expect(JSON.stringify(application.snapshot().diagnostics)).not.toMatch(/must-not-survive|client\\.key|secret/);
     expect(JSON.stringify(messages)).not.toMatch(/must-not-survive|client\\.key|secret/);
@@ -352,7 +480,9 @@ describe("application facade", () => {
     let active = 0;
     let maximum = 0;
     let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     const opcua = client();
     const connect = opcua.connect;
     opcua.connect = async (request) => {
@@ -362,8 +492,17 @@ describe("application facade", () => {
         maximum = Math.max(maximum, active);
         await gate;
         active -= 1;
-        if (Array.isArray(request)) return request.map((item) => ({ ...item, attributeId: item.attributeId ?? 13, dataValue: { status: { name: "Good", value: 0 } } }));
-        return { ...request, attributeId: request.attributeId ?? 13, dataValue: { status: { name: "Good", value: 0 } } };
+        if (Array.isArray(request))
+          return request.map((item) => ({
+            ...item,
+            attributeId: item.attributeId ?? 13,
+            dataValue: { status: { name: "Good", value: 0 } },
+          }));
+        return {
+          ...request,
+          attributeId: request.attributeId ?? 13,
+          dataValue: { status: { name: "Good", value: 0 } },
+        };
       }) as OpcUaSession["read"];
       return { ...session, read };
     };
@@ -375,7 +514,9 @@ describe("application facade", () => {
       events: { publish: () => undefined },
     });
     await application.connect({ endpointUrl: "opc.tcp://plc:4840" });
-    const pending = Promise.all(Array.from({ length: 5 }, (_, index) => application.inspectVariable(`ns=2;s=level-${index}`)));
+    const pending = Promise.all(
+      Array.from({ length: 5 }, (_, index) => application.inspectVariable(`ns=2;s=level-${index}`)),
+    );
     for (let attempt = 0; attempt < 10 && maximum < 2; attempt += 1) await Promise.resolve();
     expect(maximum).toBe(2);
     release();
@@ -399,14 +540,24 @@ describe("application facade", () => {
   it("marks an inspected value stale after loss and reports range violations", async () => {
     let lost = (): void => undefined;
     const opcua = client();
-    opcua.onConnectionLost = (listener) => { lost = () => listener({ code: "connection_lost", message: "lost" }); return () => undefined; };
+    opcua.onConnectionLost = (listener) => {
+      lost = () => listener({ code: "connection_lost", message: "lost" });
+      return () => undefined;
+    };
     const connect = opcua.connect;
     opcua.connect = async (request) => {
       const session = await connect(request);
-      const value: OpcUaDataValue = { status: { name: "Good", value: 0 }, value: { dataType: "Double", arrayType: "Scalar", value: 12 } };
-      return { ...session, read: (async (request: OpcUaReadRequest | OpcUaReadRequest[]) => Array.isArray(request)
-        ? request.map((item) => ({ ...item, attributeId: item.attributeId ?? 13, dataValue: value }))
-        : { ...request, attributeId: request.attributeId ?? 13, dataValue: value }) as OpcUaSession["read"] };
+      const value: OpcUaDataValue = {
+        status: { name: "Good", value: 0 },
+        value: { dataType: "Double", arrayType: "Scalar", value: 12 },
+      };
+      return {
+        ...session,
+        read: (async (request: OpcUaReadRequest | OpcUaReadRequest[]) =>
+          Array.isArray(request)
+            ? request.map((item) => ({ ...item, attributeId: item.attributeId ?? 13, dataValue: value }))
+            : { ...request, attributeId: request.attributeId ?? 13, dataValue: value }) as OpcUaSession["read"],
+      };
     };
     const application = createApplication({
       clientFactory: () => opcua,
@@ -415,7 +566,10 @@ describe("application facade", () => {
       events: { publish: () => undefined },
     });
     await application.connect({ endpointUrl: "opc.tcp://plc:4840" });
-    const inspection = await application.inspectVariable("ns=2;s=level", { nodeId: "ns=2;s=level", range: { high: 10 } });
+    const inspection = await application.inspectVariable("ns=2;s=level", {
+      nodeId: "ns=2;s=level",
+      range: { high: 10 },
+    });
     expect(inspection.outOfRange).toBe(true);
     lost();
     for (let attempt = 0; attempt < 5; attempt += 1) await Promise.resolve();
@@ -426,15 +580,31 @@ describe("application facade", () => {
     let lost = (): void => undefined;
     let releaseBrowse!: () => void;
     let browseStarted!: () => void;
-    const browseEntered = new Promise<void>((resolve) => { browseStarted = resolve; });
-    const hangingBrowse = new Promise<void>((resolve) => { releaseBrowse = resolve; });
+    const browseEntered = new Promise<void>((resolve) => {
+      browseStarted = resolve;
+    });
+    const hangingBrowse = new Promise<void>((resolve) => {
+      releaseBrowse = resolve;
+    });
     const opcua = client();
-    opcua.onConnectionLost = (listener) => { lost = () => listener({ code: "connection_lost", message: "lost" }); return () => undefined; };
-    opcua.connect = async () => ({ ...await client().connect({ endpointUrl: "opc.tcp://plc:4840" }), browse: async (request) => {
-      browseStarted();
-      await hangingBrowse;
-      return { nodeId: request.nodeId, references: [], status: { name: "Good", value: 0 }, requests: 1, truncated: false };
-    } });
+    opcua.onConnectionLost = (listener) => {
+      lost = () => listener({ code: "connection_lost", message: "lost" });
+      return () => undefined;
+    };
+    opcua.connect = async () => ({
+      ...(await client().connect({ endpointUrl: "opc.tcp://plc:4840" })),
+      browse: async (request) => {
+        browseStarted();
+        await hangingBrowse;
+        return {
+          nodeId: request.nodeId,
+          references: [],
+          status: { name: "Good", value: 0 },
+          requests: 1,
+          truncated: false,
+        };
+      },
+    });
     const events: ApplicationEvent[] = [];
     const application = createApplication({
       clientFactory: () => opcua,
@@ -460,7 +630,11 @@ describe("application facade", () => {
         inspections: { "ns=2;s=level": { stale: true } },
       },
     });
-    expect(lossEvents.map((event) => event.type)).toEqual(["connection-changed", "safety-changed", "diagnostic-changed"]);
+    expect(lossEvents.map((event) => event.type)).toEqual([
+      "connection-changed",
+      "safety-changed",
+      "diagnostic-changed",
+    ]);
     expect(application.snapshot()).toMatchObject({
       connection: { state: "connection-lost" },
       safety: { readOnly: true },
@@ -473,10 +647,23 @@ describe("application facade", () => {
     let lost = (): void => undefined;
     let releaseCleanup!: () => void;
     let cleanupStarted = false;
-    const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+    const cleanup = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
     const opcua = client();
-    opcua.onConnectionLost = (listener) => { lost = () => listener({ code: "connection_lost", message: "lost" }); return () => undefined; };
-    opcua.connect = async () => ({ ...await client().connect({ endpointUrl: "opc.tcp://plc:4840" }), subscribe: async () => ({ unsubscribe: async () => { cleanupStarted = true; await cleanup; } }) });
+    opcua.onConnectionLost = (listener) => {
+      lost = () => listener({ code: "connection_lost", message: "lost" });
+      return () => undefined;
+    };
+    opcua.connect = async () => ({
+      ...(await client().connect({ endpointUrl: "opc.tcp://plc:4840" })),
+      subscribe: async () => ({
+        unsubscribe: async () => {
+          cleanupStarted = true;
+          await cleanup;
+        },
+      }),
+    });
     const application = createApplication({
       clientFactory: () => opcua,
       savedConnections: store,
@@ -499,7 +686,9 @@ describe("application facade", () => {
 
   it("restores Read-Only Mode when disconnect cleanup rejects", async () => {
     const opcua = client();
-    opcua.disconnect = async () => { throw new Error("disconnect failed"); };
+    opcua.disconnect = async () => {
+      throw new Error("disconnect failed");
+    };
     const application = createApplication({
       clientFactory: () => opcua,
       savedConnections: store,
@@ -518,7 +707,9 @@ describe("application facade", () => {
 
   it("restores Read-Only Mode when close cleanup rejects", async () => {
     const opcua = client();
-    opcua.disconnect = async () => { throw new Error("close failed"); };
+    opcua.disconnect = async () => {
+      throw new Error("close failed");
+    };
     const application = createApplication({
       clientFactory: () => opcua,
       savedConnections: store,
@@ -537,7 +728,9 @@ describe("application facade", () => {
 
   it("does not run a queued Safe Read against a reconnected session", async () => {
     let releaseOldRead!: () => void;
-    const oldRead = new Promise<void>((resolve) => { releaseOldRead = resolve; });
+    const oldRead = new Promise<void>((resolve) => {
+      releaseOldRead = resolve;
+    });
     let connections = 0;
     let newReadCalls = 0;
     const opcua = client();
@@ -585,7 +778,9 @@ describe("application facade", () => {
     await pendingInspection;
     await expect(pendingRead).rejects.toMatchObject({ code: "connection_required" });
     let bothSettled = false;
-    void Promise.allSettled([pendingReadAfterReconnect]).then(() => { bothSettled = true; });
+    void Promise.allSettled([pendingReadAfterReconnect]).then(() => {
+      bothSettled = true;
+    });
     for (let attempt = 0; attempt < 10; attempt += 1) await Promise.resolve();
     expect(bothSettled).toBe(true);
     expect(newReadCalls).toBe(0);
@@ -593,7 +788,9 @@ describe("application facade", () => {
 
   it("discards a Variable Node Inspection that completes after reconnect", async () => {
     let releaseOldRead!: () => void;
-    const oldRead = new Promise<void>((resolve) => { releaseOldRead = resolve; });
+    const oldRead = new Promise<void>((resolve) => {
+      releaseOldRead = resolve;
+    });
     let connections = 0;
     const opcua = client();
     opcua.connect = async (request) => {
@@ -604,7 +801,10 @@ describe("application facade", () => {
         ...session,
         read: (async (readRequest: OpcUaReadRequest | OpcUaReadRequest[]) => {
           await oldRead;
-          const value = { status: { name: "Good", value: 0 }, value: { dataType: "Double" as const, arrayType: "Scalar" as const, value: 12 } };
+          const value = {
+            status: { name: "Good", value: 0 },
+            value: { dataType: "Double" as const, arrayType: "Scalar" as const, value: 12 },
+          };
           return Array.isArray(readRequest)
             ? readRequest.map((item) => ({ ...item, attributeId: item.attributeId ?? 13, dataValue: value }))
             : { ...readRequest, attributeId: readRequest.attributeId ?? 13, dataValue: value };
@@ -629,7 +829,9 @@ describe("application facade", () => {
 
   it("tears down a subscription that finishes establishing after reconnect", async () => {
     let releaseSubscribe!: () => void;
-    const pendingSubscribe = new Promise<void>((resolve) => { releaseSubscribe = resolve; });
+    const pendingSubscribe = new Promise<void>((resolve) => {
+      releaseSubscribe = resolve;
+    });
     let oldHandler: ((value: OpcUaDataValue) => void) | undefined;
     let unsubscribeCalls = 0;
     let connections = 0;
@@ -643,7 +845,11 @@ describe("application facade", () => {
         subscribe: async (_request, handler) => {
           oldHandler = handler;
           await pendingSubscribe;
-          return { unsubscribe: async () => { unsubscribeCalls += 1; } };
+          return {
+            unsubscribe: async () => {
+              unsubscribeCalls += 1;
+            },
+          };
         },
       };
     };
@@ -668,7 +874,13 @@ describe("application facade", () => {
   it("recomputes range state from subscription updates and clears session state on reconnect", async () => {
     let handler: ((value: OpcUaDataValue) => void) | undefined;
     const opcua = client();
-    opcua.connect = async () => ({ ...await client().connect({ endpointUrl: "opc.tcp://plc:4840" }), subscribe: async (_request, next) => { handler = next; return { unsubscribe: async () => undefined }; } });
+    opcua.connect = async () => ({
+      ...(await client().connect({ endpointUrl: "opc.tcp://plc:4840" })),
+      subscribe: async (_request, next) => {
+        handler = next;
+        return { unsubscribe: async () => undefined };
+      },
+    });
     const application = createApplication({
       clientFactory: () => opcua,
       savedConnections: store,
@@ -677,10 +889,17 @@ describe("application facade", () => {
     });
     await application.connect({ endpointUrl: "opc.tcp://first:4840" });
     await application.addToWatchlist("ns=2;s=old");
-    const inspection = await application.inspectVariable("ns=2;s=level", { nodeId: "ns=2;s=level", range: { high: 10 } });
+    const inspection = await application.inspectVariable("ns=2;s=level", {
+      nodeId: "ns=2;s=level",
+      range: { high: 10 },
+    });
     expect(inspection.outOfRange).toBe(false);
     await application.subscribe("ns=2;s=level");
-    handler?.({ status: { name: "Good", value: 0 }, value: { dataType: "Double", arrayType: "Scalar", value: 20 }, sourceTimestamp: "2026-01-01T00:00:01.000Z" });
+    handler?.({
+      status: { name: "Good", value: 0 },
+      value: { dataType: "Double", arrayType: "Scalar", value: 20 },
+      sourceTimestamp: "2026-01-01T00:00:01.000Z",
+    });
     expect(application.snapshot().inspections["ns=2;s=level"]?.outOfRange).toBe(true);
     await application.disconnect();
     await application.connect({ endpointUrl: "opc.tcp://second:4840" });

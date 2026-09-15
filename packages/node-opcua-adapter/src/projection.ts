@@ -1,9 +1,4 @@
-import {
-  DataType,
-  Int64ToBigInt,
-  UInt64ToBigInt,
-  VariantArrayType,
-} from "node-opcua";
+import { DataType, Int64ToBigInt, UInt64ToBigInt, VariantArrayType } from "node-opcua";
 import type { Variant } from "node-opcua";
 import type {
   OpcUaDataValue,
@@ -101,7 +96,9 @@ function projectValue(value: unknown, depth = 0, context = projectionContext()):
   }
   if (ArrayBuffer.isView(value)) {
     if (depth >= MAX_DEPTH) return "[object omitted: depth limit]";
-    return projectArray(value as unknown as ArrayLike<unknown>, depth, context, (item) => projectValue(item, depth + 1, context));
+    return projectArray(value as unknown as ArrayLike<unknown>, depth, context, (item) =>
+      projectValue(item, depth + 1, context),
+    );
   }
   if (typeof value === "object") return projectObject(value as ObjectLike, depth, context);
   return String(value);
@@ -133,7 +130,13 @@ function projectVariantValue(variant: Variant, context: ProjectionContext, depth
         : [];
     if (context.ancestors.has(values)) return "[object omitted: cycle]";
     context.ancestors.add(values);
-    const projected = projectArray(values, depth, context, (value, itemDepth) => projectScalar(value, variant.dataType, context, itemDepth), false);
+    const projected = projectArray(
+      values,
+      depth,
+      context,
+      (value, itemDepth) => projectScalar(value, variant.dataType, context, itemDepth),
+      false,
+    );
     context.ancestors.delete(values);
     return projected;
   }
@@ -150,7 +153,11 @@ function projectScalar(value: unknown, dataType: DataType, context: ProjectionCo
       return projectValue(value, depth, context);
     case DataType.DataValue:
       if (value && typeof value === "object" && "statusCode" in value) {
-        return projectDataValueInternal(value as Parameters<typeof projectDataValue>[0], context, depth) as unknown as TransportValue;
+        return projectDataValueInternal(
+          value as Parameters<typeof projectDataValue>[0],
+          context,
+          depth,
+        ) as unknown as TransportValue;
       }
       return projectValue(value, depth, context);
     case DataType.Int64:
@@ -158,14 +165,18 @@ function projectScalar(value: unknown, dataType: DataType, context: ProjectionCo
     case DataType.UInt64:
       return projectInt64(value, false);
     case DataType.ByteString:
-      return Buffer.isBuffer(value) ? value.subarray(0, 48 * 1024).toString("base64") : projectValue(value, depth, context);
+      return Buffer.isBuffer(value)
+        ? value.subarray(0, 48 * 1024).toString("base64")
+        : projectValue(value, depth, context);
     case DataType.NodeId:
     case DataType.ExpandedNodeId:
       return value && typeof value === "object" && "toString" in value
         ? boundedString(String(value))
         : projectValue(value, depth, context);
     case DataType.DateTime:
-      return value instanceof Date && !Number.isNaN(value.getTime()) ? value.toISOString() : projectValue(value, depth, context);
+      return value instanceof Date && !Number.isNaN(value.getTime())
+        ? value.toISOString()
+        : projectValue(value, depth, context);
     default:
       return projectValue(value, depth, context);
   }
@@ -180,9 +191,9 @@ function projectVariantInternal(variant: Variant, context: ProjectionContext, de
   if (variant.dimensions?.length) {
     result.dimensions = variant.dimensions
       .slice(0, MAX_ARRAY_LENGTH)
-      .map((dimension) => Number.isSafeInteger(dimension) && dimension >= 0
-        ? Math.min(dimension, MAX_ARRAY_LENGTH)
-        : 0);
+      .map((dimension) =>
+        Number.isSafeInteger(dimension) && dimension >= 0 ? Math.min(dimension, MAX_ARRAY_LENGTH) : 0,
+      );
   }
   return result;
 }
@@ -195,22 +206,28 @@ export function projectStatusCode(statusCode: { name: string; value: number }): 
   return { name: boundedString(statusCode.name), value: statusCode.value };
 }
 
-function projectDataValueInternal(dataValue: {
-  statusCode: { name: string; value: number };
-  sourceTimestamp?: Date | null;
-  serverTimestamp?: Date | null;
-  sourcePicoseconds?: number;
-  serverPicoseconds?: number;
-  value?: Variant | null;
-}, context: ProjectionContext, depth: number): OpcUaDataValue {
+function projectDataValueInternal(
+  dataValue: {
+    statusCode: { name: string; value: number };
+    sourceTimestamp?: Date | null;
+    serverTimestamp?: Date | null;
+    sourcePicoseconds?: number;
+    serverPicoseconds?: number;
+    value?: Variant | null;
+  },
+  context: ProjectionContext,
+  depth: number,
+): OpcUaDataValue {
   return {
     status: projectStatusCode(dataValue.statusCode),
-    sourceTimestamp: dataValue.sourceTimestamp && !Number.isNaN(dataValue.sourceTimestamp.getTime())
-      ? dataValue.sourceTimestamp.toISOString()
-      : undefined,
-    serverTimestamp: dataValue.serverTimestamp && !Number.isNaN(dataValue.serverTimestamp.getTime())
-      ? dataValue.serverTimestamp.toISOString()
-      : undefined,
+    sourceTimestamp:
+      dataValue.sourceTimestamp && !Number.isNaN(dataValue.sourceTimestamp.getTime())
+        ? dataValue.sourceTimestamp.toISOString()
+        : undefined,
+    serverTimestamp:
+      dataValue.serverTimestamp && !Number.isNaN(dataValue.serverTimestamp.getTime())
+        ? dataValue.serverTimestamp.toISOString()
+        : undefined,
     sourcePicoseconds: dataValue.sourcePicoseconds,
     serverPicoseconds: dataValue.serverPicoseconds,
     value: dataValue.value ? projectVariantInternal(dataValue.value, context, depth + 1) : undefined,
@@ -236,8 +253,18 @@ export function projectQualifiedName(value: { namespaceIndex: number; name?: str
 }
 
 export function projectNodeClass(nodeClass: number): OpcUaNodeClass {
-  const name = ["Unspecified", "Object", "Variable", "Method", "ObjectType", "VariableType", "ReferenceType", "DataType", "View"];
-  return name[Math.log2(nodeClass)] as OpcUaNodeClass ?? "Unspecified";
+  const name = [
+    "Unspecified",
+    "Object",
+    "Variable",
+    "Method",
+    "ObjectType",
+    "VariableType",
+    "ReferenceType",
+    "DataType",
+    "View",
+  ];
+  return (name[Math.log2(nodeClass)] as OpcUaNodeClass) ?? "Unspecified";
 }
 
 export function projectReference(reference: {

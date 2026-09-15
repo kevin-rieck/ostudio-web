@@ -16,5 +16,14 @@
     "type": "safety-changed",
     "payload": { "readOnly": true, "safetyGeneration": 8 }
   },
-  "rejectedFields": ["password", "cookie", "privateKey", "certificateContents", "hostPath", "variableMutationValue", "methodInputs", "methodOutputs"]
+  "rejectedFields": [
+    "password",
+    "cookie",
+    "privateKey",
+    "certificateContents",
+    "hostPath",
+    "variableMutationValue",
+    "methodInputs",
+    "methodOutputs"
+  ]
 }
