@@ -229,6 +229,62 @@ describe("server routes", () => {
     expect((await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers: { origin: "http://localhost:8080", cookie: secondCookie } })).json()).toMatchObject({ role: "controller" });
   });
 
+  it("revokes control before reporting an expired authenticated session", async () => {
+    const clock = fakeTimers();
+    const calls: string[] = [];
+    let releaseReadOnly!: () => void;
+    const readOnlyRestored = new Promise<void>((resolve) => { releaseReadOnly = resolve; });
+    server = await createServer({
+      now: clock.now,
+      timers: clock.timers,
+      runtime: { setReadOnly: () => { calls.push("read-only"); return readOnlyRestored; } },
+      env: developmentEnvironment,
+    });
+    const login = await server.inject({ method: "POST", url: "/api/v1/auth/login", headers: { origin: "http://localhost:8080" }, payload: { username: "admin", password: "correct horse battery staple" } });
+    const cookie = String(login.headers["set-cookie"]);
+    await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers: { origin: "http://localhost:8080", cookie } });
+    clock.setTime(24 * 60 * 60 * 1000);
+
+    let completed = false;
+    const expiredSession = server.inject({ method: "GET", url: "/api/v1/auth/session", headers: { cookie } }).finally(() => { completed = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(completed).toBe(false);
+    releaseReadOnly();
+    expect((await expiredSession).json()).toMatchObject({ authenticated: false });
+    expect((await server.inject({ method: "GET", url: "/api/v1/snapshot", headers: { cookie } })).statusCode).toBe(401);
+    expect(calls).toEqual(["read-only"]);
+  });
+
+  it("disconnects before reporting an expired session when restoring Read-Only Mode fails", async () => {
+    const clock = fakeTimers();
+    const calls: string[] = [];
+    let restoreAttempts = 0;
+    let releaseDisconnect!: () => void;
+    const disconnectCompleted = new Promise<void>((resolve) => { releaseDisconnect = resolve; });
+    server = await createServer({
+      now: clock.now,
+      timers: clock.timers,
+      runtime: {
+        setReadOnly: async () => { calls.push("read-only"); if (restoreAttempts++ === 0) throw new Error("failed"); },
+        disconnect: async () => { calls.push("disconnect"); await disconnectCompleted; },
+      },
+      env: developmentEnvironment,
+    });
+    const login = await server.inject({ method: "POST", url: "/api/v1/auth/login", headers: { origin: "http://localhost:8080" }, payload: { username: "admin", password: "correct horse battery staple" } });
+    const cookie = String(login.headers["set-cookie"]);
+    await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers: { origin: "http://localhost:8080", cookie } });
+    clock.setTime(24 * 60 * 60 * 1000);
+
+    let completed = false;
+    const expiredSession = server.inject({ method: "GET", url: "/api/v1/snapshot", headers: { cookie } }).finally(() => { completed = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(calls).toEqual(["read-only", "disconnect"]);
+    expect(clock.scheduled).toHaveLength(0);
+    expect(completed).toBe(false);
+    releaseDisconnect();
+    expect((await expiredSession).statusCode).toBe(401);
+  });
+
   it("rejects stale lease renewals from the current controller", async () => {
     server = await createServer({ env: developmentEnvironment });
     const login = await server.inject({ method: "POST", url: "/api/v1/auth/login", headers: { origin: "http://localhost:8080" }, payload: { username: "admin", password: "correct horse battery staple" } });
@@ -257,6 +313,8 @@ describe("server routes", () => {
     const second = await login();
     await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers: { origin: "http://localhost:8080", cookie: first } });
     expect((await server.inject({ method: "POST", url: "/api/v1/auth/logout", headers: { origin: "http://localhost:8080", cookie: second } })).statusCode).toBe(204);
+    expect((await server.inject({ method: "GET", url: "/api/v1/snapshot", headers: { cookie: first } })).json()).toMatchObject({ controller: { role: "observer", controllerGeneration: 2 } });
+    expect((await server.inject({ method: "POST", url: "/api/v1/controller/renew?controllerGeneration=1", headers: { origin: "http://localhost:8080", cookie: first } })).statusCode).toBe(409);
     expect(calls).toEqual(["read-only", "disconnect"]);
   });
 

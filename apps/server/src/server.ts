@@ -317,6 +317,23 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     publishEvent("ownership-changed", { role: "controller", controllerGeneration });
   };
   const revokeController = (): Promise<void> => serializeControl(revokeControllerState);
+  const revokeExpiredController = async (): Promise<void> => {
+    try {
+      await revokeController();
+    } catch {
+      server.log.error("Unable to restore Read-Only Mode after authentication expiry.");
+      clearDisconnectGrace();
+      recoverableControllerSessionId = undefined;
+      const disconnect = options.runtime?.disconnect ?? options.runtime?.close;
+      if (disconnect) {
+        try {
+          await disconnect();
+        } catch {
+          server.log.error("Unable to disconnect the runtime after authentication expiry.");
+        }
+      }
+    }
+  };
   const expireController = (): Promise<void> => serializeControl(async () => {
     if (controllerLeaseExpiresAt === undefined || now() < controllerLeaseExpiresAt) {
       scheduleControllerExpiry();
@@ -388,7 +405,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       if (isAuthSession) {
         const token = cookieValue(request.headers.cookie);
         current.authSession = authenticator.session(token);
-        if (!current.authSession && token === controllerOwner) void revokeController().catch(() => server.log.error("Unable to restore Read-Only Mode after authentication expiry."));
+        if (!current.authSession && token === controllerOwner) await revokeExpiredController();
       }
       return;
     }
@@ -399,7 +416,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     const token = cookieValue(request.headers.cookie);
     const session = authenticator.session(token);
     if (!session) {
-      if (token === controllerOwner) void revokeController().catch(() => server.log.error("Unable to restore Read-Only Mode after authentication expiry."));
+      if (token === controllerOwner) await revokeExpiredController();
       unauthorized(reply);
       return;
     }
@@ -431,10 +448,9 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     return reply.code(204).send();
   });
   server.post("/api/v1/auth/logout", async (request, reply) => {
-    const sessionId = (request as RequestWithSession).authSession?.id;
     await serializeControl(async () => {
       try {
-        if (sessionId === controllerOwner) await revokeControllerState();
+        if (controllerOwner !== undefined) await revokeControllerState();
         else await restoreReadOnly();
       } finally {
         clearDisconnectGrace();
