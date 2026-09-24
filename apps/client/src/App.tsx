@@ -130,12 +130,26 @@ export function App() {
     }
   }
 
+  async function recoverControl(): Promise<void> {
+    setMessage(undefined);
+    try {
+      const controller = await api.recoverController();
+      controllerControls.current?.setGeneration(controller.controllerGeneration);
+      setControllerRole(controller.role);
+      setSnapshot((current) => current && { ...current, controller });
+      if (controller.role === "controller") controllerControls.current?.startRenewal();
+    } catch (error) {
+      setMessage(error instanceof ApiClientError ? error.message : "Control recovery failed.");
+    }
+  }
+
   async function takeOver(): Promise<void> {
     setMessage(undefined);
     try {
       const controller = await api.takeOverController();
       controllerControls.current?.setGeneration(controller.controllerGeneration);
       setControllerRole(controller.role);
+      setSnapshot((current) => current && { ...current, controller });
       if (controller.role === "controller") controllerControls.current?.startRenewal();
     } catch (error) {
       setMessage(error instanceof ApiClientError ? error.message : "Control transfer failed.");
@@ -164,7 +178,9 @@ export function App() {
           <h2>Troubleshooting Session</h2>
           <p>Authentication succeeded. This browser is ready for OPC UA Studio.</p>
           <p role="status">{snapshot?.connection.state ?? "disconnected"} · {controllerRole === "controller" ? "Controller" : "Observer"}</p>
-          {controllerRole === "observer" && <button type="button" onClick={() => void takeOver()}>Take over control</button>}
+          {controllerRole === "observer" && (snapshot?.controller.recoverable
+            ? <button type="button" onClick={() => void recoverControl()}>Recover control</button>
+            : <button type="button" onClick={() => void takeOver()}>Take over control</button>)}
           <button type="button" onClick={() => void logout()}>Sign out</button>
         </>
       ) : (

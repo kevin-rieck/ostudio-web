@@ -147,6 +147,20 @@
         }
       }
     },
+    "/api/v1/controller/recover": {
+      "post": {
+        "operationId": "recoverController",
+        "security": [{ "sessionCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "The authenticated browser explicitly recovered its expired controller lease in Read-Only Mode.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControllerState" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/ControllerUnavailable" }
+        }
+      }
+    },
     "/api/v1/controller/takeover": {
       "post": {
         "operationId": "takeOverController",
@@ -349,7 +363,8 @@
         "properties": {
           "role": { "type": "string", "enum": ["controller", "observer"] },
           "controllerGeneration": { "type": "integer", "minimum": 0 },
-          "leaseExpiresAt": { "type": "string", "format": "date-time" }
+          "leaseExpiresAt": { "type": "string", "format": "date-time" },
+          "recoverable": { "type": "boolean" }
         }
       },
       "SafetyState": {

@@ -160,11 +160,12 @@ function unauthorized(reply: FastifyReply): void {
   void reply.code(401).send(errorBody("authentication_required", "Authentication is required."));
 }
 
-function controllerState(session: AuthSession, owner: string | undefined, generation: number, expiresAt: number | undefined): Snapshot["controller"] {
+function controllerState(session: AuthSession, owner: string | undefined, generation: number, expiresAt: number | undefined, recoverableSessionId?: string): Snapshot["controller"] {
   return {
     role: owner === session.id ? "controller" : "observer",
     controllerGeneration: generation,
     ...(owner === session.id && expiresAt ? { leaseExpiresAt: new Date(expiresAt).toISOString() } : {}),
+    ...(recoverableSessionId === session.id ? { recoverable: true } : {}),
   };
 }
 
@@ -247,7 +248,8 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
         const nodeId = "nodeId" in event.payload ? event.payload.nodeId : undefined;
         const index = nodeId === undefined ? -1 : client.queue.findIndex((queued) => queued.type === event.type && "nodeId" in queued.payload && queued.payload.nodeId === nodeId);
         if (index >= 0) {
-          client.queue[index] = event;
+          client.queue.splice(index, 1);
+          client.queue.push(event);
           return;
         }
       }
@@ -277,18 +279,23 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     disconnectGraceTimer = undefined;
   };
   const restoreReadOnly = (): Promise<void> => Promise.resolve(options.runtime?.setReadOnly?.(true));
+  const disconnectRuntime = async (message: string, bounded = false): Promise<void> => {
+    const disconnect = options.runtime?.disconnect ?? options.runtime?.close;
+    if (!disconnect) return;
+    try {
+      const operation = disconnect();
+      if (bounded) await Promise.race([operation, new Promise<void>((resolve) => setTimeout(resolve, 5_000))]);
+      else await operation;
+    } catch {
+      server.log.error(message);
+    }
+  };
   const disconnectAfterGrace = (): void => {
     disconnectGraceTimer = undefined;
     void serializeControl(async () => {
       if (shuttingDown || controllerOwner !== undefined || recoverableControllerSessionId === undefined) return;
       recoverableControllerSessionId = undefined;
-      const disconnect = options.runtime?.disconnect ?? options.runtime?.close;
-      if (!disconnect) return;
-      try {
-        await disconnect();
-      } catch {
-        server.log.error("Unable to disconnect the runtime after controller loss.");
-      }
+      await disconnectRuntime("Unable to disconnect the runtime after controller loss.");
     });
   };
   const scheduleDisconnectGrace = (): void => {
@@ -305,7 +312,14 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     controllerGeneration += 1;
     scheduleDisconnectGrace();
     publishEvent("ownership-changed", { role: "observer", controllerGeneration });
-    await restoreReadOnly();
+    try {
+      await restoreReadOnly();
+    } catch (error) {
+      clearDisconnectGrace();
+      recoverableControllerSessionId = undefined;
+      await disconnectRuntime("Unable to disconnect the runtime after Read-Only Mode restoration failed.");
+      throw error;
+    }
   };
   const grantController = (sessionId: string, generationAlreadyChanged = false): void => {
     recoverableControllerSessionId = undefined;
@@ -322,16 +336,6 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       await revokeController();
     } catch {
       server.log.error("Unable to restore Read-Only Mode after authentication expiry.");
-      clearDisconnectGrace();
-      recoverableControllerSessionId = undefined;
-      const disconnect = options.runtime?.disconnect ?? options.runtime?.close;
-      if (disconnect) {
-        try {
-          await disconnect();
-        } catch {
-          server.log.error("Unable to disconnect the runtime after authentication expiry.");
-        }
-      }
     }
   };
   const expireController = (): Promise<void> => serializeControl(async () => {
@@ -364,13 +368,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       controllerGeneration += 1;
       await serializeControl(restoreReadOnly);
       for (const client of [...eventClients]) closeEventClient(client);
-      const disconnect = options.runtime?.disconnect ?? options.runtime?.close;
-      if (disconnect) {
-        await Promise.race([
-          disconnect().catch(() => undefined),
-          new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
-        ]);
-      }
+      await disconnectRuntime("Unable to disconnect the runtime during shutdown.", true);
       try {
         await server.close();
       } finally {
@@ -448,22 +446,13 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     return reply.code(204).send();
   });
   server.post("/api/v1/auth/logout", async (request, reply) => {
+    const session = (request as RequestWithSession).authSession!;
     await serializeControl(async () => {
-      try {
-        if (controllerOwner !== undefined) await revokeControllerState();
-        else await restoreReadOnly();
-      } finally {
-        clearDisconnectGrace();
-        recoverableControllerSessionId = undefined;
-        const disconnect = options.runtime?.disconnect ?? options.runtime?.close;
-        if (disconnect) {
-          try {
-            await disconnect();
-          } catch {
-            server.log.error("Unable to disconnect the runtime after logout.");
-          }
-        }
-      }
+      if (controllerOwner !== session.id && recoverableControllerSessionId !== session.id) return;
+      if (controllerOwner === session.id) await revokeControllerState();
+      clearDisconnectGrace();
+      recoverableControllerSessionId = undefined;
+      await disconnectRuntime("Unable to disconnect the runtime after logout.");
     });
     authenticator.logout(cookieValue(request.headers.cookie));
     reply.header("Set-Cookie", `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict${config.secureCookies ? "; Secure" : ""}; Max-Age=0`);
@@ -487,7 +476,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       sequence: snapshotSequence,
       buildVersion,
       generatedAt: new Date(now()).toISOString(),
-      controller: controllerState(session, controllerOwner, controllerGeneration, controllerLeaseExpiresAt),
+      controller: controllerState(session, controllerOwner, controllerGeneration, controllerLeaseExpiresAt, recoverableControllerSessionId),
     } satisfies Snapshot;
   });
   server.post("/api/v1/controller/attach", async (request, reply) => {
@@ -500,11 +489,22 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
         }
         return;
       }
-      if (recoverableControllerSessionId !== undefined && recoverableControllerSessionId !== session.id) return;
-      if (recoverableControllerSessionId === session.id) await restoreReadOnly();
+      if (recoverableControllerSessionId !== undefined) return;
       grantController(session.id);
     });
-    return reply.send(controllerState(session, controllerOwner, controllerGeneration, controllerLeaseExpiresAt));
+    return reply.send(controllerState(session, controllerOwner, controllerGeneration, controllerLeaseExpiresAt, recoverableControllerSessionId));
+  });
+  server.post("/api/v1/controller/recover", async (request, reply) => {
+    const session = (request as RequestWithSession).authSession!;
+    let recovered = false;
+    await serializeControl(async () => {
+      if (controllerOwner !== undefined || recoverableControllerSessionId !== session.id) return;
+      await restoreReadOnly();
+      grantController(session.id);
+      recovered = true;
+    });
+    if (!recovered) return reply.code(409).send(errorBody("controller_generation_mismatch", "The controller recovery is no longer current."));
+    return reply.send(controllerState(session, controllerOwner, controllerGeneration, controllerLeaseExpiresAt, recoverableControllerSessionId));
   });
   server.post("/api/v1/controller/takeover", async (request, reply) => {
     const session = (request as RequestWithSession).authSession!;
@@ -514,7 +514,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       else await restoreReadOnly();
       grantController(session.id, hadController);
     });
-    return reply.send(controllerState(session, controllerOwner, controllerGeneration, controllerLeaseExpiresAt));
+    return reply.send(controllerState(session, controllerOwner, controllerGeneration, controllerLeaseExpiresAt, recoverableControllerSessionId));
   });
   server.post("/api/v1/controller/renew", async (request, reply) => {
     const session = (request as RequestWithSession).authSession!;

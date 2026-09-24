@@ -171,6 +171,32 @@ describe("server routes", () => {
     expect((await server.inject({ method: "GET", url: "/api/v1/snapshot", headers: { cookie } })).json()).toMatchObject({ controller: { role: "observer", controllerGeneration: 2 } });
   });
 
+  it("disconnects immediately when lease loss cannot restore Read-Only Mode", async () => {
+    const clock = fakeTimers();
+    const calls: string[] = [];
+    let restoreAttempts = 0;
+    server = await createServer({
+      now: clock.now,
+      timers: clock.timers,
+      controllerLeaseMilliseconds: 10,
+      controllerDisconnectGraceMilliseconds: 20,
+      runtime: {
+        setReadOnly: () => { calls.push("read-only"); if (restoreAttempts++ === 0) throw new Error("failed"); },
+        disconnect: async () => { calls.push("disconnect"); },
+      },
+      env: developmentEnvironment,
+    });
+    const login = await server.inject({ method: "POST", url: "/api/v1/auth/login", headers: { origin: "http://localhost:8080" }, payload: { username: "admin", password: "correct horse battery staple" } });
+    const cookie = String(login.headers["set-cookie"]);
+    await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers: { origin: "http://localhost:8080", cookie } });
+    clock.setTime(10);
+    clock.scheduled.shift()!.callback();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls).toEqual(["read-only", "disconnect"]);
+    expect(clock.scheduled).toHaveLength(0);
+  });
+
   it("starts the disconnect grace period after lease loss and permits only same-browser recovery", async () => {
     const clock = fakeTimers();
     const calls: string[] = [];
@@ -195,7 +221,9 @@ describe("server routes", () => {
     await Promise.resolve();
     expect((await server.inject({ method: "GET", url: "/api/v1/snapshot", headers: { cookie: first } })).json()).toMatchObject({ controller: { role: "observer" } });
     expect((await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers: { origin: "http://localhost:8080", cookie: second } })).json()).toMatchObject({ role: "observer" });
-    expect((await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers: { origin: "http://localhost:8080", cookie: first } })).json()).toMatchObject({ role: "controller" });
+    expect((await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers: { origin: "http://localhost:8080", cookie: first } })).json()).toMatchObject({ role: "observer", recoverable: true });
+    expect((await server.inject({ method: "POST", url: "/api/v1/controller/recover", headers: { origin: "http://localhost:8080", cookie: first } })).json()).toMatchObject({ role: "controller" });
+    expect((await server.inject({ method: "POST", url: "/api/v1/controller/recover", headers: { origin: "http://localhost:8080", cookie: first } })).statusCode).toBe(409);
     expect(calls).toEqual(["read-only", "read-only"]);
     clock.setTime(20);
     await server.inject({ method: "POST", url: "/api/v1/controller/takeover", headers: { origin: "http://localhost:8080", cookie: second } });
@@ -313,9 +341,9 @@ describe("server routes", () => {
     const second = await login();
     await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers: { origin: "http://localhost:8080", cookie: first } });
     expect((await server.inject({ method: "POST", url: "/api/v1/auth/logout", headers: { origin: "http://localhost:8080", cookie: second } })).statusCode).toBe(204);
-    expect((await server.inject({ method: "GET", url: "/api/v1/snapshot", headers: { cookie: first } })).json()).toMatchObject({ controller: { role: "observer", controllerGeneration: 2 } });
-    expect((await server.inject({ method: "POST", url: "/api/v1/controller/renew?controllerGeneration=1", headers: { origin: "http://localhost:8080", cookie: first } })).statusCode).toBe(409);
-    expect(calls).toEqual(["read-only", "disconnect"]);
+    expect((await server.inject({ method: "GET", url: "/api/v1/snapshot", headers: { cookie: first } })).json()).toMatchObject({ controller: { role: "controller", controllerGeneration: 1 } });
+    expect((await server.inject({ method: "POST", url: "/api/v1/controller/renew?controllerGeneration=1", headers: { origin: "http://localhost:8080", cookie: first } })).statusCode).toBe(204);
+    expect(calls).toEqual([]);
   });
 
   it("revokes the old browser on takeover", async () => {

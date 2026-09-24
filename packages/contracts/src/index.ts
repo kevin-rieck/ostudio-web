@@ -43,6 +43,7 @@ export interface ControllerState {
   role: "controller" | "observer";
   controllerGeneration: number;
   leaseExpiresAt?: string;
+  recoverable?: boolean;
 }
 
 export interface SafetyState {
@@ -215,6 +216,7 @@ export interface ApiClient {
   attachEvents(afterSequence?: number): Promise<void>;
   getDiagnosticReport(): Promise<DiagnosticReport>;
   attachController(): Promise<ControllerState>;
+  recoverController(): Promise<ControllerState>;
   takeOverController(): Promise<ControllerState>;
   renewControllerLease(controllerGeneration: number): Promise<void>;
   prepareMutation(request: PrepareMutationRequest): Promise<PrepareMutationResponse>;
@@ -284,6 +286,10 @@ export function createApiClient(transport: ContractTransport = defaultTransport,
 
   attachController(): Promise<ControllerState> {
     return send<ControllerState>("POST", "/api/v1/controller/attach");
+  },
+
+  recoverController(): Promise<ControllerState> {
+    return send<ControllerState>("POST", "/api/v1/controller/recover");
   },
 
   takeOverController(): Promise<ControllerState> {
