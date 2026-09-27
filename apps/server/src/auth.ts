@@ -21,9 +21,7 @@ export interface AuthSession {
   readonly expiresAt: number;
 }
 
-export type LoginResult =
-  | { ok: true; token: string; session: AuthSession }
-  | { ok: false; retryAfterMs?: number };
+export type LoginResult = { ok: true; token: string; session: AuthSession } | { ok: false; retryAfterMs?: number };
 
 export interface Authenticator {
   login(username: string, password: string, source: string): Promise<LoginResult>;
@@ -98,13 +96,21 @@ export async function createAuthenticator(options: AuthenticatorOptions): Promis
       if (!valid) {
         registerFailure(sourceBucket, timestamp);
         registerFailure(globalFailures, timestamp);
-        return { ok: false, retryAfterMs: Math.max(blocked(sourceBucket, timestamp), blocked(globalFailures, timestamp)) };
+        return {
+          ok: false,
+          retryAfterMs: Math.max(blocked(sourceBucket, timestamp), blocked(globalFailures, timestamp)),
+        };
       }
 
       sourceFailures.delete(source);
       resetBucket(globalFailures);
       const token = randomBytes(32).toString("base64url");
-      const session: AuthSession = { id: token, createdAt: timestamp, lastActivityAt: timestamp, expiresAt: timestamp + ABSOLUTE_MS };
+      const session: AuthSession = {
+        id: token,
+        createdAt: timestamp,
+        lastActivityAt: timestamp,
+        expiresAt: timestamp + ABSOLUTE_MS,
+      };
       sessions.set(token, session);
       return { ok: true, token, session };
     },
@@ -129,4 +135,9 @@ export async function createAuthenticator(options: AuthenticatorOptions): Promis
   };
 }
 
-export const authConstants = { inactivityMs: INACTIVITY_MS, absoluteMs: ABSOLUTE_MS, failureQuietPeriodMs: FAILURE_QUIET_PERIOD_MS, genericFailure: GENERIC_FAILURE } as const;
+export const authConstants = {
+  inactivityMs: INACTIVITY_MS,
+  absoluteMs: ABSOLUTE_MS,
+  failureQuietPeriodMs: FAILURE_QUIET_PERIOD_MS,
+  genericFailure: GENERIC_FAILURE,
+} as const;

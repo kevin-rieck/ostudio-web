@@ -174,7 +174,10 @@ function mutationFailure(error: unknown): OpcUaMutationResult {
     outcome: "unknown",
     error: {
       code,
-      message: code === "timeout" ? "The operation deadline elapsed before completion was proven." : "The connection was lost before completion was proven.",
+      message:
+        code === "timeout"
+          ? "The operation deadline elapsed before completion was proven."
+          : "The connection was lost before completion was proven.",
     },
   };
 }
@@ -183,9 +186,12 @@ function mutationResult(statusCode: { name: string; value: number; isGood(): boo
   const status = projectStatusCode(statusCode);
   return statusCode.isGood()
     ? { outcome: "succeeded", status }
-    : { outcome: "rejected", status, error: { code: "server_rejected", message: "The OPC UA Server rejected the operation." } };
+    : {
+        outcome: "rejected",
+        status,
+        error: { code: "server_rejected", message: "The OPC UA Server rejected the operation." },
+      };
 }
-
 
 function nodeIdDataType(value: unknown): OpcUaDataType | string | undefined {
   const text = String(value);
@@ -193,7 +199,7 @@ function nodeIdDataType(value: unknown): OpcUaDataType | string | undefined {
   if (!match) return boundedString(text) || undefined;
   const numericId = Number(match[1]);
   const dataType = DataType[numericId];
-  return numericId !== DataType.Null && typeof dataType === "string" ? dataType as OpcUaDataType : undefined;
+  return numericId !== DataType.Null && typeof dataType === "string" ? (dataType as OpcUaDataType) : undefined;
 }
 
 function dimensions(value: unknown): number[] | null | undefined {
@@ -203,39 +209,41 @@ function dimensions(value: unknown): number[] | null | undefined {
     ? value.length
     : value instanceof DataView
       ? 0
-      : (value as ArrayBufferView & { length?: number }).length ?? 0;
+      : ((value as ArrayBufferView & { length?: number }).length ?? 0);
   if (length > MAX_VARIANT_DIMENSIONS) return null;
   const values = Array.from(value as ArrayLike<unknown>);
-  return values.every((item) => typeof item === "number" && Number.isSafeInteger(item) && item >= 0 && item <= MAX_VARIANT_ARRAY_LENGTH)
-    ? values as number[]
+  return values.every(
+    (item) => typeof item === "number" && Number.isSafeInteger(item) && item >= 0 && item <= MAX_VARIANT_ARRAY_LENGTH,
+  )
+    ? (values as number[])
     : null;
 }
 
-function variantShapeMatches(
-  variant: OpcUaVariant,
-  valueRank: number,
-  arrayDimensions?: number[],
-): boolean {
+function variantShapeMatches(variant: OpcUaVariant, valueRank: number, arrayDimensions?: number[]): boolean {
   if (!Number.isInteger(valueRank) || valueRank < -3) return false;
   const isScalar = variant.arrayType === "Scalar";
   const actualDimensions = isScalar
     ? []
-    : variant.dimensions ?? (variant.arrayType === "Array"
-      ? [Array.isArray(variant.value)
-        ? variant.value.length
-        : ArrayBuffer.isView(variant.value)
-          ? (variant.value as ArrayBufferView & { length?: number }).length ?? 0
-          : 0]
-      : []);
-  const rankMatches = valueRank === -1
-    ? isScalar
-    : valueRank === -2
-      ? true
-      : valueRank === -3
-        ? isScalar || (!isScalar && actualDimensions.length === 1)
-        : valueRank === 0
-          ? !isScalar
-          : !isScalar && valueRank > 0 && actualDimensions.length === valueRank;
+    : (variant.dimensions ??
+      (variant.arrayType === "Array"
+        ? [
+            Array.isArray(variant.value)
+              ? variant.value.length
+              : ArrayBuffer.isView(variant.value)
+                ? ((variant.value as ArrayBufferView & { length?: number }).length ?? 0)
+                : 0,
+          ]
+        : []));
+  const rankMatches =
+    valueRank === -1
+      ? isScalar
+      : valueRank === -2
+        ? true
+        : valueRank === -3
+          ? isScalar || (!isScalar && actualDimensions.length === 1)
+          : valueRank === 0
+            ? !isScalar
+            : !isScalar && valueRank > 0 && actualDimensions.length === valueRank;
   if (!rankMatches) return false;
   if (!arrayDimensions?.length) return true;
   if (actualDimensions.length !== arrayDimensions.length) return false;
@@ -243,7 +251,9 @@ function variantShapeMatches(
 }
 
 function variantMatchesArgument(variant: OpcUaVariant, argument: OpcUaMethodArgument): boolean {
-  return variant.dataType === argument.dataType && variantShapeMatches(variant, argument.valueRank, argument.arrayDimensions);
+  return (
+    variant.dataType === argument.dataType && variantShapeMatches(variant, argument.valueRank, argument.arrayDimensions)
+  );
 }
 
 function argumentProjection(argument: Argument): OpcUaMethodArgument {
@@ -253,7 +263,8 @@ function argumentProjection(argument: Argument): OpcUaMethodArgument {
     valueRank: argument.valueRank,
     description: projectLocalizedText(argument.description),
   };
-  if (argument.arrayDimensions?.length) result.arrayDimensions = argument.arrayDimensions.slice(0, MAX_VARIANT_DIMENSIONS);
+  if (argument.arrayDimensions?.length)
+    result.arrayDimensions = argument.arrayDimensions.slice(0, MAX_VARIANT_DIMENSIONS);
   return result;
 }
 
@@ -312,10 +323,13 @@ function variantInput(value: OpcUaVariant): Variant {
       throw new NodeOpcuaAdapterError("invalid_request", "The requested OPC UA array type is unsupported.");
     }
     const variantDimensions = value.dimensions;
-    if (variantDimensions && (
-      variantDimensions.length > MAX_VARIANT_DIMENSIONS
-      || variantDimensions.some((dimension) => !Number.isSafeInteger(dimension) || dimension < 0 || dimension > MAX_VARIANT_ARRAY_LENGTH)
-    )) {
+    if (
+      variantDimensions &&
+      (variantDimensions.length > MAX_VARIANT_DIMENSIONS ||
+        variantDimensions.some(
+          (dimension) => !Number.isSafeInteger(dimension) || dimension < 0 || dimension > MAX_VARIANT_ARRAY_LENGTH,
+        ))
+    ) {
       throw new NodeOpcuaAdapterError("invalid_request", "The requested OPC UA matrix dimensions are invalid.");
     }
     const variant = new Variant({
@@ -324,7 +338,8 @@ function variantInput(value: OpcUaVariant): Variant {
       value: transportValue(value.value, dataType),
       dimensions: variantDimensions,
     });
-    if (!variant.isValid()) throw new NodeOpcuaAdapterError("invalid_request", "The requested OPC UA value is invalid.");
+    if (!variant.isValid())
+      throw new NodeOpcuaAdapterError("invalid_request", "The requested OPC UA value is invalid.");
     return variant;
   } catch (error) {
     if (error instanceof NodeOpcuaAdapterError) throw error;
@@ -333,7 +348,11 @@ function variantInput(value: OpcUaVariant): Variant {
 }
 
 function browseDirection(value: OpcUaBrowseRequest["direction"]): BrowseDirection {
-  return value === "inverse" ? BrowseDirection.Inverse : value === "both" ? BrowseDirection.Both : BrowseDirection.Forward;
+  return value === "inverse"
+    ? BrowseDirection.Inverse
+    : value === "both"
+      ? BrowseDirection.Both
+      : BrowseDirection.Forward;
 }
 
 class NodeOpcuaSubscription implements OpcUaSubscription {
@@ -420,17 +439,15 @@ class NodeOpcuaSession implements OpcUaSession {
       if ((rawReferences?.length ?? 0) > remaining) truncated = true;
     };
     try {
-      result = await withDeadline(
-        this.session.browse(description),
-        this.owner.browseTimeout,
-      );
+      result = await withDeadline(this.session.browse(description), this.owner.browseTimeout);
       requests += 1;
       appendReferences(result.references);
-      while (result.continuationPoint?.length && requests < maxRequests && references.length < MAX_REFERENCES_PER_NODE) {
-        result = await withDeadline(
-          this.session.browseNext(result.continuationPoint, false),
-          this.owner.browseTimeout,
-        );
+      while (
+        result.continuationPoint?.length &&
+        requests < maxRequests &&
+        references.length < MAX_REFERENCES_PER_NODE
+      ) {
+        result = await withDeadline(this.session.browseNext(result.continuationPoint, false), this.owner.browseTimeout);
         requests += 1;
         appendReferences(result.references);
       }
@@ -524,11 +541,8 @@ class NodeOpcuaSession implements OpcUaSession {
         }
       };
       monitoredItem.on("changed", changed);
-      const result = new NodeOpcuaSubscription(
-        subscription,
-        monitoredItem,
-        changed,
-        (terminated) => this.subscriptions.delete(terminated),
+      const result = new NodeOpcuaSubscription(subscription, monitoredItem, changed, (terminated) =>
+        this.subscriptions.delete(terminated),
       );
       this.subscriptions.add(result);
       return result;
@@ -541,10 +555,16 @@ class NodeOpcuaSession implements OpcUaSession {
   async write(request: OpcUaWriteRequest): Promise<OpcUaMutationResult> {
     this.ensureOpen();
     if (!request.value || typeof request.value !== "object") {
-      return { outcome: "rejected", error: { code: "invalid_metadata", message: "Variable Node metadata or value is invalid." } };
+      return {
+        outcome: "rejected",
+        error: { code: "invalid_metadata", message: "Variable Node metadata or value is invalid." },
+      };
     }
     if (request.attributeId !== undefined && request.attributeId !== VALUE_ATTRIBUTE) {
-      return { outcome: "rejected", error: { code: "invalid_metadata", message: "Only Variable Node values may be written." } };
+      return {
+        outcome: "rejected",
+        error: { code: "invalid_metadata", message: "Only Variable Node values may be written." },
+      };
     }
 
     let metadata;
@@ -582,12 +602,12 @@ class NodeOpcuaSession implements OpcUaSession {
     const accessLevel = Number(metadata[4]!.value.value);
     const userAccessLevel = Number(metadata[5]!.value.value);
     if (
-      nodeClass !== 2
-      || (accessLevel & AccessLevelFlag.CurrentWrite) === 0
-      || (userAccessLevel & AccessLevelFlag.CurrentWrite) === 0
-      || dataType !== request.value.dataType
-      || arrayDimensions === null
-      || !variantShapeMatches(request.value, valueRank, arrayDimensions)
+      nodeClass !== 2 ||
+      (accessLevel & AccessLevelFlag.CurrentWrite) === 0 ||
+      (userAccessLevel & AccessLevelFlag.CurrentWrite) === 0 ||
+      dataType !== request.value.dataType ||
+      arrayDimensions === null ||
+      !variantShapeMatches(request.value, valueRank, arrayDimensions)
     ) {
       return {
         outcome: "rejected",
@@ -607,7 +627,10 @@ class NodeOpcuaSession implements OpcUaSession {
       );
     } catch (error) {
       if (error instanceof NodeOpcuaAdapterError) {
-        return { outcome: "rejected", error: { code: "invalid_metadata", message: "Variable Node metadata or value is invalid." } };
+        return {
+          outcome: "rejected",
+          error: { code: "invalid_metadata", message: "Variable Node metadata or value is invalid." },
+        };
       }
       return mutationFailure(error);
     }
@@ -649,9 +672,9 @@ class NodeOpcuaSession implements OpcUaSession {
         deadline,
       );
       if (
-        executable.length !== 2
-        || executable.some((item) => !item.statusCode.isGood() || !item.value)
-        || executable.some((item) => item.value.value !== true)
+        executable.length !== 2 ||
+        executable.some((item) => !item.statusCode.isGood() || !item.value) ||
+        executable.some((item) => item.value.value !== true)
       ) {
         return {
           outcome: "rejected",
@@ -742,7 +765,8 @@ class NodeOpcuaAdapter implements OpcUaClient {
   readonly methodCallTimeout: number;
 
   constructor(private readonly options: NodeOpcuaAdapterOptions) {
-    this.maxBrowseRequests = boundedLimit(options.maxBrowseRequests, DEFAULT_MAX_BROWSE_REQUESTS, MAX_BROWSE_REQUESTS) || 1;
+    this.maxBrowseRequests =
+      boundedLimit(options.maxBrowseRequests, DEFAULT_MAX_BROWSE_REQUESTS, MAX_BROWSE_REQUESTS) || 1;
     this.maxReferencesPerNode = positiveBoundedLimit(
       options.maxReferencesPerNode,
       DEFAULT_MAX_REFERENCES_PER_NODE,
@@ -785,18 +809,34 @@ class NodeOpcuaAdapter implements OpcUaClient {
     const mode = request.securityMode ?? "None";
     const policy = request.securityPolicyUri ?? SecurityPolicy.None;
     const selectedRaw = discovered.endpoints.find(
-      (endpoint) => endpoint.endpointUrl === request.endpointUrl && endpoint.securityMode === securityMode(mode) && endpoint.securityPolicyUri === policy,
+      (endpoint) =>
+        endpoint.endpointUrl === request.endpointUrl &&
+        endpoint.securityMode === securityMode(mode) &&
+        endpoint.securityPolicyUri === policy,
     );
-    if (!selectedRaw) throw new NodeOpcuaAdapterError("endpoint_not_found", "The requested OPC UA endpoint was not advertised.");
+    if (!selectedRaw)
+      throw new NodeOpcuaAdapterError("endpoint_not_found", "The requested OPC UA endpoint was not advertised.");
     const selected = endpointProjection(selectedRaw);
     if (mode !== "None" && !selectedRaw.serverCertificate) {
-      throw new NodeOpcuaAdapterError("server_certificate_required", "The secure OPC UA endpoint did not provide a server certificate.");
+      throw new NodeOpcuaAdapterError(
+        "server_certificate_required",
+        "The secure OPC UA endpoint did not provide a server certificate.",
+      );
     }
     if (mode !== "None" && !request.serverCertificateFingerprint) {
-      throw new NodeOpcuaAdapterError("server_certificate_required", "A trusted server certificate fingerprint is required for a secure connection.");
+      throw new NodeOpcuaAdapterError(
+        "server_certificate_required",
+        "A trusted server certificate fingerprint is required for a secure connection.",
+      );
     }
-    if (mode !== "None" && selected.serverCertificateFingerprint !== request.serverCertificateFingerprint?.toLowerCase()) {
-      throw new NodeOpcuaAdapterError("connection_failed", "The OPC UA Server certificate fingerprint did not match the trusted fingerprint.");
+    if (
+      mode !== "None" &&
+      selected.serverCertificateFingerprint !== request.serverCertificateFingerprint?.toLowerCase()
+    ) {
+      throw new NodeOpcuaAdapterError(
+        "connection_failed",
+        "The OPC UA Server certificate fingerprint did not match the trusted fingerprint.",
+      );
     }
 
     const rawClient = this.createRawClient({
@@ -812,7 +852,9 @@ class NodeOpcuaAdapter implements OpcUaClient {
       this.notifyConnectionLoss(event);
     };
     try {
-      rawClient.on("connection_lost", () => notifyLoss({ code: "connection_lost", message: "The OPC UA connection was lost." }));
+      rawClient.on("connection_lost", () =>
+        notifyLoss({ code: "connection_lost", message: "The OPC UA connection was lost." }),
+      );
       rawClient.on("close", () => {
         if (this.rawClient === rawClient && this.session) {
           notifyLoss({ code: "session_closed", message: "The OPC UA connection was closed." });
@@ -820,7 +862,9 @@ class NodeOpcuaAdapter implements OpcUaClient {
       });
       await withDeadline(rawClient.connect(selected.endpointUrl), this.connectTimeout);
       const rawSession = await withDeadline(
-        rawClient.createSession(request.userIdentity ? this.userIdentity(request.userIdentity) : { type: UserTokenType.Anonymous }),
+        rawClient.createSession(
+          request.userIdentity ? this.userIdentity(request.userIdentity) : { type: UserTokenType.Anonymous },
+        ),
         this.connectTimeout,
       );
       this.rawClient = rawClient;
@@ -860,7 +904,8 @@ class NodeOpcuaAdapter implements OpcUaClient {
       defaultTransactionTimeout: this.options.defaultTransactionTimeout,
       certificateFile: this.options.certificateFile,
       privateKeyFile: this.options.privateKeyFile,
-      clientCertificateManager: this.options.clientCertificateManager as RawOpcuaClientOptions["clientCertificateManager"],
+      clientCertificateManager: this.options
+        .clientCertificateManager as RawOpcuaClientOptions["clientCertificateManager"],
       ...overrides,
     };
     return OPCUAClient.create(clientOptions);
@@ -898,4 +943,3 @@ class NodeOpcuaAdapter implements OpcUaClient {
 export function createNodeOpcuaAdapter(options: NodeOpcuaAdapterOptions): OpcUaClient {
   return new NodeOpcuaAdapter(options);
 }
-

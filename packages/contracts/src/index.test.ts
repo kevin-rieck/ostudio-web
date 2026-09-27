@@ -15,10 +15,22 @@ describe("generated contract client", () => {
     };
     const client = createApiClient(transport, "");
     await client.loginAdmin({ username: "admin", password: "correct horse battery staple" });
-    await expect(client.getAuthenticationSession()).resolves.toEqual({ authenticated: true, insecureDevelopment: false });
-    expect(calls[0]).toMatchObject({ input: "/api/v1/auth/login", init: { method: "POST", credentials: "same-origin" } });
+    await expect(client.getAuthenticationSession()).resolves.toEqual({
+      authenticated: true,
+      insecureDevelopment: false,
+    });
+    expect(calls[0]).toMatchObject({
+      input: "/api/v1/auth/login",
+      init: { method: "POST", credentials: "same-origin" },
+    });
 
-    const failing = createApiClient(async () => response(401, { code: "authentication_required", message: "Nope", correlationId: "cor-01J00000000000000000000000" }));
+    const failing = createApiClient(async () =>
+      response(401, {
+        code: "authentication_required",
+        message: "Nope",
+        correlationId: "cor-01J00000000000000000000000",
+      }),
+    );
     await expect(failing.logoutAdmin()).rejects.toBeInstanceOf(ApiClientError);
   });
 });

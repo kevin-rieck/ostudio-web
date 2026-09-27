@@ -29,5 +29,13 @@
     "correlationId": "cor-01J00000000000000000000000",
     "outcome": "unknown"
   },
-  "removedFields": ["password", "cookie", "privateKey", "hostPath", "variableMutationValue", "methodInputs", "methodOutputs"]
+  "removedFields": [
+    "password",
+    "cookie",
+    "privateKey",
+    "hostPath",
+    "variableMutationValue",
+    "methodInputs",
+    "methodOutputs"
+  ]
 }

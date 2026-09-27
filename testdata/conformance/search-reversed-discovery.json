@@ -13,8 +13,6 @@
     { "nodeId": "ns=2;s=shared", "browseName": "pressure", "explicitBrowse": true, "distance": 2 },
     { "nodeId": "ns=2;s=shared", "displayName": "pressure sensor", "explicitBrowse": false, "distance": 5 }
   ],
-  "candidates": [
-    { "nodeId": "ns=2;s=shared", "explicitBrowse": true, "distance": 2 }
-  ],
+  "candidates": [{ "nodeId": "ns=2;s=shared", "explicitBrowse": true, "distance": 2 }],
   "orderedNodeIds": ["ns=2;s=shared"]
 }

@@ -3,9 +3,5 @@ dist/
 coverage/
 playwright-report/
 test-results/
-.env
-.env.*
-!.env.example
-*.log
-nul
-.DS_Store
+api/openapi.yaml
+packages/contracts/src/index.ts

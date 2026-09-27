@@ -58,12 +58,18 @@ type RuntimeConfig = {
 function positiveMilliseconds(value: string | undefined, name: string, fallback: number): number {
   if (value === undefined) return fallback;
   const milliseconds = Number(value);
-  if (!Number.isSafeInteger(milliseconds) || milliseconds <= 0) throw new Error(`${name} must be a positive number of milliseconds.`);
+  if (!Number.isSafeInteger(milliseconds) || milliseconds <= 0)
+    throw new Error(`${name} must be a positive number of milliseconds.`);
   return milliseconds;
 }
 
 function errorBody(code: string, message: string, operationId?: string): Record<string, unknown> {
-  return { code, message, correlationId: `cor-${randomBytes(16).toString("base64url")}`, ...(operationId ? { operationId } : {}) };
+  return {
+    code,
+    message,
+    correlationId: `cor-${randomBytes(16).toString("base64url")}`,
+    ...(operationId ? { operationId } : {}),
+  };
 }
 
 function parseOrigin(value: string | undefined, fallback: string): string {
@@ -74,7 +80,14 @@ function parseOrigin(value: string | undefined, fallback: string): string {
   } catch {
     throw new Error("OSTUDIO_PUBLIC_ORIGIN must be a valid HTTP(S) public origin.");
   }
-  if (!(parsed.protocol === "http:" || parsed.protocol === "https:") || parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) {
+  if (
+    !(parsed.protocol === "http:" || parsed.protocol === "https:") ||
+    parsed.username ||
+    parsed.password ||
+    parsed.pathname !== "/" ||
+    parsed.search ||
+    parsed.hash
+  ) {
     throw new Error("OSTUDIO_PUBLIC_ORIGIN must be a valid HTTP(S) public origin.");
   }
   return parsed.origin;
@@ -82,8 +95,12 @@ function parseOrigin(value: string | undefined, fallback: string): string {
 
 async function runtimeConfig(environment: Environment): Promise<RuntimeConfig> {
   const production = environment.NODE_ENV === "production";
-  const insecureDevelopment = environment.OSTUDIO_INSECURE_DEV === "true" || environment.OPCUA_STUDIO_INSECURE_DEV === "true";
-  const publicOrigin = parseOrigin(environment.OSTUDIO_PUBLIC_ORIGIN ?? environment.OPCUA_STUDIO_PUBLIC_ORIGIN, production ? "" : `http://localhost:${environment.PORT ?? "8080"}`);
+  const insecureDevelopment =
+    environment.OSTUDIO_INSECURE_DEV === "true" || environment.OPCUA_STUDIO_INSECURE_DEV === "true";
+  const publicOrigin = parseOrigin(
+    environment.OSTUDIO_PUBLIC_ORIGIN ?? environment.OPCUA_STUDIO_PUBLIC_ORIGIN,
+    production ? "" : `http://localhost:${environment.PORT ?? "8080"}`,
+  );
   const publicUrl = new URL(publicOrigin);
   const localhost = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(publicUrl.hostname);
   if (!publicOrigin.startsWith("https://") && (production || !localhost)) {
@@ -96,7 +113,8 @@ async function runtimeConfig(environment: Environment): Promise<RuntimeConfig> {
   const directPassword = environment.OPCUA_STUDIO_ADMIN_PASSWORD ?? environment.OSTUDIO_ADMIN_PASSWORD;
   if (production && !passwordFile) throw new Error("Production requires an admin password file.");
   if (insecureDevelopment && !localhost) throw new Error("Insecure development mode is localhost-only.");
-  if (directPassword && !insecureDevelopment) throw new Error("Direct admin passwords require explicit insecure development mode.");
+  if (directPassword && !insecureDevelopment)
+    throw new Error("Direct admin passwords require explicit insecure development mode.");
   if (production && insecureDevelopment) throw new Error("Insecure development mode is not available in production.");
   let password = randomBytes(32).toString("base64url");
   if (passwordFile) {
@@ -116,10 +134,21 @@ async function runtimeConfig(environment: Environment): Promise<RuntimeConfig> {
     publicOrigin,
     secureCookies: publicUrl.protocol === "https:",
     insecureDevelopment: !production && (insecureDevelopment || publicUrl.protocol !== "https:"),
-    trustedProxyCidrs: (environment.OSTUDIO_TRUSTED_PROXY_CIDRS ?? environment.OPCUA_STUDIO_TRUSTED_PROXY_CIDRS ?? "").split(",").map((value) => value.trim()).filter(Boolean),
+    trustedProxyCidrs: (environment.OSTUDIO_TRUSTED_PROXY_CIDRS ?? environment.OPCUA_STUDIO_TRUSTED_PROXY_CIDRS ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
     password,
-    controllerLeaseMilliseconds: positiveMilliseconds(environment.OSTUDIO_CONTROLLER_LEASE_MS ?? environment.OPCUA_STUDIO_CONTROLLER_LEASE_MS, "OSTUDIO_CONTROLLER_LEASE_MS", DEFAULT_CONTROLLER_LEASE_MS),
-    controllerDisconnectGraceMilliseconds: positiveMilliseconds(environment.OSTUDIO_CONTROLLER_DISCONNECT_GRACE_MS ?? environment.OPCUA_STUDIO_CONTROLLER_DISCONNECT_GRACE_MS, "OSTUDIO_CONTROLLER_DISCONNECT_GRACE_MS", DEFAULT_CONTROLLER_DISCONNECT_GRACE_MS),
+    controllerLeaseMilliseconds: positiveMilliseconds(
+      environment.OSTUDIO_CONTROLLER_LEASE_MS ?? environment.OPCUA_STUDIO_CONTROLLER_LEASE_MS,
+      "OSTUDIO_CONTROLLER_LEASE_MS",
+      DEFAULT_CONTROLLER_LEASE_MS,
+    ),
+    controllerDisconnectGraceMilliseconds: positiveMilliseconds(
+      environment.OSTUDIO_CONTROLLER_DISCONNECT_GRACE_MS ?? environment.OPCUA_STUDIO_CONTROLLER_DISCONNECT_GRACE_MS,
+      "OSTUDIO_CONTROLLER_DISCONNECT_GRACE_MS",
+      DEFAULT_CONTROLLER_DISCONNECT_GRACE_MS,
+    ),
   };
 }
 
@@ -136,7 +165,11 @@ function cookieValue(header: string | undefined): string | undefined {
   for (const part of (header ?? "").split(";")) {
     const separator = part.indexOf("=");
     if (separator < 0 || part.slice(0, separator).trim() !== SESSION_COOKIE) continue;
-    try { return decodeURIComponent(part.slice(separator + 1).trim()); } catch { return undefined; }
+    try {
+      return decodeURIComponent(part.slice(separator + 1).trim());
+    } catch {
+      return undefined;
+    }
   }
   return undefined;
 }
@@ -149,7 +182,10 @@ function sameOrigin(request: FastifyRequest, config: RuntimeConfig): boolean {
 }
 
 function securityHeaders(reply: FastifyReply): void {
-  reply.header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+  reply.header(
+    "Content-Security-Policy",
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+  );
   reply.header("X-Frame-Options", "DENY");
   reply.header("X-Content-Type-Options", "nosniff");
   reply.header("Referrer-Policy", "no-referrer");
@@ -160,7 +196,13 @@ function unauthorized(reply: FastifyReply): void {
   void reply.code(401).send(errorBody("authentication_required", "Authentication is required."));
 }
 
-function controllerState(session: AuthSession, owner: string | undefined, generation: number, expiresAt: number | undefined, recoverableSessionId?: string): Snapshot["controller"] {
+function controllerState(
+  session: AuthSession,
+  owner: string | undefined,
+  generation: number,
+  expiresAt: number | undefined,
+  recoverableSessionId?: string,
+): Snapshot["controller"] {
   return {
     role: owner === session.id ? "controller" : "observer",
     controllerGeneration: generation,
@@ -184,18 +226,23 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     bodyLimit: 1024 * 1024,
     trustProxy: config.trustedProxyCidrs.length > 0 ? config.trustedProxyCidrs : false,
   }) as unknown as WebServer;
-  if (config.insecureDevelopment) server.log.warn("Insecure development mode is enabled; do not expose this server publicly.");
+  if (config.insecureDevelopment)
+    server.log.warn("Insecure development mode is enabled; do not expose this server publicly.");
   const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
-  const assetsDirectory = options.assetsDirectory ?? environment.OSTUDIO_WEB_ASSETS_DIR ?? path.resolve(moduleDirectory, "../../client/dist");
+  const assetsDirectory =
+    options.assetsDirectory ?? environment.OSTUDIO_WEB_ASSETS_DIR ?? path.resolve(moduleDirectory, "../../client/dist");
   const hasClientAssets = await fileExists(path.join(assetsDirectory, "index.html"));
   if (environment.NODE_ENV === "production" && !hasClientAssets) {
     throw new Error("Production assets are missing index.html.");
   }
   const buildVersion = environment.OSTUDIO_BUILD_VERSION ?? "0.0.0";
   const controllerLeaseMilliseconds = options.controllerLeaseMilliseconds ?? config.controllerLeaseMilliseconds;
-  const controllerDisconnectGraceMilliseconds = options.controllerDisconnectGraceMilliseconds ?? config.controllerDisconnectGraceMilliseconds;
-  if (!Number.isSafeInteger(controllerLeaseMilliseconds) || controllerLeaseMilliseconds <= 0) throw new Error("controllerLeaseMilliseconds must be a positive integer.");
-  if (!Number.isSafeInteger(controllerDisconnectGraceMilliseconds) || controllerDisconnectGraceMilliseconds <= 0) throw new Error("controllerDisconnectGraceMilliseconds must be a positive integer.");
+  const controllerDisconnectGraceMilliseconds =
+    options.controllerDisconnectGraceMilliseconds ?? config.controllerDisconnectGraceMilliseconds;
+  if (!Number.isSafeInteger(controllerLeaseMilliseconds) || controllerLeaseMilliseconds <= 0)
+    throw new Error("controllerLeaseMilliseconds must be a positive integer.");
+  if (!Number.isSafeInteger(controllerDisconnectGraceMilliseconds) || controllerDisconnectGraceMilliseconds <= 0)
+    throw new Error("controllerDisconnectGraceMilliseconds must be a positive integer.");
   let controllerOwner: string | undefined;
   let recoverableControllerSessionId: string | undefined;
   let controllerGeneration = 0;
@@ -207,7 +254,10 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   let controlQueue = Promise.resolve();
   const serializeControl = <T>(operation: () => Promise<T> | T): Promise<T> => {
     const result = controlQueue.then(operation, operation);
-    controlQueue = result.then(() => undefined, () => undefined);
+    controlQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
     return result;
   };
 
@@ -246,7 +296,13 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     if (client.paused) {
       if (event.type === "live-value-changed") {
         const nodeId = "nodeId" in event.payload ? event.payload.nodeId : undefined;
-        const index = nodeId === undefined ? -1 : client.queue.findIndex((queued) => queued.type === event.type && "nodeId" in queued.payload && queued.payload.nodeId === nodeId);
+        const index =
+          nodeId === undefined
+            ? -1
+            : client.queue.findIndex(
+                (queued) =>
+                  queued.type === event.type && "nodeId" in queued.payload && queued.payload.nodeId === nodeId,
+              );
         if (index >= 0) {
           client.queue.splice(index, 1);
           client.queue.push(event);
@@ -338,14 +394,17 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       server.log.error("Unable to restore Read-Only Mode after authentication expiry.");
     }
   };
-  const expireController = (): Promise<void> => serializeControl(async () => {
-    if (controllerLeaseExpiresAt === undefined || now() < controllerLeaseExpiresAt) {
-      scheduleControllerExpiry();
-      return;
-    }
-    await revokeControllerState();
-  });
-  const onControllerExpired = (): void => { void expireController().catch(() => server.log.error("Unable to restore Read-Only Mode after controller expiry.")); };
+  const expireController = (): Promise<void> =>
+    serializeControl(async () => {
+      if (controllerLeaseExpiresAt === undefined || now() < controllerLeaseExpiresAt) {
+        scheduleControllerExpiry();
+        return;
+      }
+      await revokeControllerState();
+    });
+  const onControllerExpired = (): void => {
+    void expireController().catch(() => server.log.error("Unable to restore Read-Only Mode after controller expiry."));
+  };
   const scheduleControllerExpiry = (): void => {
     if (controllerExpiryTimer !== undefined) timers.clearTimeout(controllerExpiryTimer);
     controllerExpiryTimer = undefined;
@@ -394,7 +453,10 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     const pathname = requestPath(request, config.publicOrigin);
     const isLogin = pathname === "/api/v1/auth/login";
     const isAuthSession = pathname === "/api/v1/auth/session";
-    const protectedApi = pathname === "/api/v1/auth/logout" || ["/api/v1/build", "/api/v1/snapshot", "/api/v1/events", "/api/v1/diagnostics"].includes(pathname) || pathname.startsWith("/api/v1/controller/");
+    const protectedApi =
+      pathname === "/api/v1/auth/logout" ||
+      ["/api/v1/build", "/api/v1/snapshot", "/api/v1/events", "/api/v1/diagnostics"].includes(pathname) ||
+      pathname.startsWith("/api/v1/controller/");
     if (isLogin && !sameOrigin(request, config)) {
       void reply.code(403).send(errorBody("origin_rejected", "The request origin is not allowed."));
       return;
@@ -422,8 +484,12 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   });
 
   server.setErrorHandler((error, request, reply) => {
-    const statusCode = typeof error === "object" && error !== null && "statusCode" in error && typeof error.statusCode === "number" ? error.statusCode : 500;
-    if (statusCode === 413) return void reply.code(413).send(errorBody("request_too_large", "The request is too large."));
+    const statusCode =
+      typeof error === "object" && error !== null && "statusCode" in error && typeof error.statusCode === "number"
+        ? error.statusCode
+        : 500;
+    if (statusCode === 413)
+      return void reply.code(413).send(errorBody("request_too_large", "The request is too large."));
     if (statusCode === 400) return void reply.code(400).send(errorBody("bad_request", "The request is invalid."));
     request.log.error("request failed");
     return void reply.code(500).send(errorBody("internal_error", "The request could not be completed."));
@@ -431,20 +497,24 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
 
   server.get("/health/live", async () => ({ status: "ok" }));
   server.get("/health/ready", async () => ({ status: "ready" }));
-  server.post("/api/v1/auth/login", {
-    schema: {
-      body: loginRequestSchema,
+  server.post(
+    "/api/v1/auth/login",
+    {
+      schema: {
+        body: loginRequestSchema,
+      },
     },
-  }, async (request, reply) => {
-    const body = request.body as { username: string; password: string };
-    const result = await authenticator.login(body.username, body.password, request.ip);
-    if (!result.ok) {
-      if (result.retryAfterMs !== undefined) reply.header("Retry-After", Math.ceil(result.retryAfterMs / 1000));
-      return reply.code(401).send(errorBody("authentication_required", authConstants.genericFailure));
-    }
-    reply.header("Set-Cookie", `${authenticator.cookie(result.token)}${config.secureCookies ? "; Secure" : ""}`);
-    return reply.code(204).send();
-  });
+    async (request, reply) => {
+      const body = request.body as { username: string; password: string };
+      const result = await authenticator.login(body.username, body.password, request.ip);
+      if (!result.ok) {
+        if (result.retryAfterMs !== undefined) reply.header("Retry-After", Math.ceil(result.retryAfterMs / 1000));
+        return reply.code(401).send(errorBody("authentication_required", authConstants.genericFailure));
+      }
+      reply.header("Set-Cookie", `${authenticator.cookie(result.token)}${config.secureCookies ? "; Secure" : ""}`);
+      return reply.code(204).send();
+    },
+  );
   server.post("/api/v1/auth/logout", async (request, reply) => {
     const session = (request as RequestWithSession).authSession!;
     await serializeControl(async () => {
@@ -455,7 +525,10 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       await disconnectRuntime("Unable to disconnect the runtime after logout.");
     });
     authenticator.logout(cookieValue(request.headers.cookie));
-    reply.header("Set-Cookie", `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict${config.secureCookies ? "; Secure" : ""}; Max-Age=0`);
+    reply.header(
+      "Set-Cookie",
+      `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict${config.secureCookies ? "; Secure" : ""}; Max-Age=0`,
+    );
     return reply.code(204).send();
   });
   server.get("/api/v1/auth/session", async (request) => {
@@ -476,7 +549,13 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       sequence: snapshotSequence,
       buildVersion,
       generatedAt: new Date(now()).toISOString(),
-      controller: controllerState(session, controllerOwner, controllerGeneration, controllerLeaseExpiresAt, recoverableControllerSessionId),
+      controller: controllerState(
+        session,
+        controllerOwner,
+        controllerGeneration,
+        controllerLeaseExpiresAt,
+        recoverableControllerSessionId,
+      ),
     } satisfies Snapshot;
   });
   server.post("/api/v1/controller/attach", async (request, reply) => {
@@ -492,7 +571,15 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       if (recoverableControllerSessionId !== undefined) return;
       grantController(session.id);
     });
-    return reply.send(controllerState(session, controllerOwner, controllerGeneration, controllerLeaseExpiresAt, recoverableControllerSessionId));
+    return reply.send(
+      controllerState(
+        session,
+        controllerOwner,
+        controllerGeneration,
+        controllerLeaseExpiresAt,
+        recoverableControllerSessionId,
+      ),
+    );
   });
   server.post("/api/v1/controller/recover", async (request, reply) => {
     const session = (request as RequestWithSession).authSession!;
@@ -503,8 +590,19 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       grantController(session.id);
       recovered = true;
     });
-    if (!recovered) return reply.code(409).send(errorBody("controller_generation_mismatch", "The controller recovery is no longer current."));
-    return reply.send(controllerState(session, controllerOwner, controllerGeneration, controllerLeaseExpiresAt, recoverableControllerSessionId));
+    if (!recovered)
+      return reply
+        .code(409)
+        .send(errorBody("controller_generation_mismatch", "The controller recovery is no longer current."));
+    return reply.send(
+      controllerState(
+        session,
+        controllerOwner,
+        controllerGeneration,
+        controllerLeaseExpiresAt,
+        recoverableControllerSessionId,
+      ),
+    );
   });
   server.post("/api/v1/controller/takeover", async (request, reply) => {
     const session = (request as RequestWithSession).authSession!;
@@ -514,15 +612,36 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       else await restoreReadOnly();
       grantController(session.id, hadController);
     });
-    return reply.send(controllerState(session, controllerOwner, controllerGeneration, controllerLeaseExpiresAt, recoverableControllerSessionId));
+    return reply.send(
+      controllerState(
+        session,
+        controllerOwner,
+        controllerGeneration,
+        controllerLeaseExpiresAt,
+        recoverableControllerSessionId,
+      ),
+    );
   });
   server.post("/api/v1/controller/renew", async (request, reply) => {
     const session = (request as RequestWithSession).authSession!;
     const generation = Number(new URL(request.url, config.publicOrigin).searchParams.get("controllerGeneration"));
     return serializeControl(async () => {
-      if (!Number.isSafeInteger(generation) || generation !== controllerGeneration || controllerOwner !== session.id || controllerLeaseExpiresAt === undefined || now() >= controllerLeaseExpiresAt) {
-        if (controllerOwner === session.id && controllerLeaseExpiresAt !== undefined && now() >= controllerLeaseExpiresAt) await revokeControllerState();
-        return reply.code(409).send(errorBody("controller_generation_mismatch", "The controller lease is no longer current."));
+      if (
+        !Number.isSafeInteger(generation) ||
+        generation !== controllerGeneration ||
+        controllerOwner !== session.id ||
+        controllerLeaseExpiresAt === undefined ||
+        now() >= controllerLeaseExpiresAt
+      ) {
+        if (
+          controllerOwner === session.id &&
+          controllerLeaseExpiresAt !== undefined &&
+          now() >= controllerLeaseExpiresAt
+        )
+          await revokeControllerState();
+        return reply
+          .code(409)
+          .send(errorBody("controller_generation_mismatch", "The controller lease is no longer current."));
       }
       controllerLeaseExpiresAt = now() + controllerLeaseMilliseconds;
       scheduleControllerExpiry();
@@ -583,7 +702,9 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     await server.register(fastifyStatic, { root: assetsDirectory, wildcard: false });
   }
   server.setNotFoundHandler(async (request, reply) => {
-    const reservedPath = ["/api/", "/health/", "/assets/"].some((prefix) => requestPath(request, config.publicOrigin).startsWith(prefix));
+    const reservedPath = ["/api/", "/health/", "/assets/"].some((prefix) =>
+      requestPath(request, config.publicOrigin).startsWith(prefix),
+    );
     const acceptsHtml = request.headers.accept?.includes("text/html") ?? false;
     if (hasClientAssets && !reservedPath && acceptsHtml) return reply.sendFile("index.html");
     return reply.code(404).send({ error: "not_found" });

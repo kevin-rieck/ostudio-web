@@ -1,12 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import {
-  MessageSecurityMode,
-  OPCUACertificateManager,
-  OPCUAServer,
-  SecurityPolicy,
-} from "node-opcua";
+import { MessageSecurityMode, OPCUACertificateManager, OPCUAServer, SecurityPolicy } from "node-opcua";
 
 export type OpcUaTestServer = {
   server: OPCUAServer;
@@ -15,10 +10,12 @@ export type OpcUaTestServer = {
   endpointUrl: string;
 };
 
-export async function createOpcUaTestServer(options: {
-  securityPolicies?: SecurityPolicy[];
-  securityModes?: MessageSecurityMode[];
-} = {}): Promise<OpcUaTestServer> {
+export async function createOpcUaTestServer(
+  options: {
+    securityPolicies?: SecurityPolicy[];
+    securityModes?: MessageSecurityMode[];
+  } = {},
+): Promise<OpcUaTestServer> {
   const temporaryDirectory = await mkdtemp(path.join(tmpdir(), "ostudio-node-opcua-test-"));
   const serverCertificateManager = new OPCUACertificateManager({
     rootFolder: path.join(temporaryDirectory, "server-pki"),

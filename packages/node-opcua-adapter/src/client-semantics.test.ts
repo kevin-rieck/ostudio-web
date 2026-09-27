@@ -57,10 +57,7 @@ async function waitFor(condition: () => boolean, timeout = 2_000): Promise<void>
   }
 }
 
-function waitForChanged(
-  monitoredItem: ClientMonitoredItem,
-  predicate: (value: number) => boolean,
-): Promise<DataValue> {
+function waitForChanged(monitoredItem: ClientMonitoredItem, predicate: (value: number) => boolean): Promise<DataValue> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       monitoredItem.removeListener("changed", onChanged);
@@ -128,11 +125,13 @@ function findExactEndpoint(
 }
 
 function configuredSecureEndpoint(): EndpointDescription {
-  const endpoint = fixture.server.endpoints[0]?.endpointDescriptions().find(
-    (candidate) =>
-      candidate.securityMode === MessageSecurityMode.SignAndEncrypt &&
-      candidate.securityPolicyUri === SecurityPolicy.Basic256Sha256,
-  );
+  const endpoint = fixture.server.endpoints[0]
+    ?.endpointDescriptions()
+    .find(
+      (candidate) =>
+        candidate.securityMode === MessageSecurityMode.SignAndEncrypt &&
+        candidate.securityPolicyUri === SecurityPolicy.Basic256Sha256,
+    );
   if (!endpoint) {
     throw new Error("The in-process server did not expose its secure endpoint");
   }
@@ -395,9 +394,7 @@ describe("node-opcua client semantics", () => {
       });
       expect(writeStatus.name).toBe("Good");
       expect(
-        (
-          await session.read({ nodeId: fixture.writableVariable.nodeId, attributeId: AttributeIds.Value })
-        ).value.value,
+        (await session.read({ nodeId: fixture.writableVariable.nodeId, attributeId: AttributeIds.Value })).value.value,
       ).toBe(7);
 
       subscription = await session.createSubscription2({

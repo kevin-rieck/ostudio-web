@@ -11,10 +11,13 @@ export function App() {
   const [insecureDevelopment, setInsecureDevelopment] = useState(false);
   const [controllerRole, setControllerRole] = useState<"controller" | "observer">("observer");
   const [snapshot, setSnapshot] = useState<Snapshot>();
-  const controllerControls = useRef<{ setGeneration(generation: number): void; startRenewal(): void } | undefined>(undefined);
+  const controllerControls = useRef<{ setGeneration(generation: number): void; startRenewal(): void } | undefined>(
+    undefined,
+  );
 
   useEffect(() => {
-    void api.getAuthenticationSession()
+    void api
+      .getAuthenticationSession()
       .then((session) => {
         setAuthenticated(session.authenticated);
         setInsecureDevelopment(session.insecureDevelopment);
@@ -40,7 +43,11 @@ export function App() {
       renewTimer = undefined;
     };
     const retry = (connectEvents: () => Promise<void>): void => {
-      if (!stopped && retryTimer === undefined) retryTimer = window.setTimeout(() => { retryTimer = undefined; void connectEvents(); }, 1_000);
+      if (!stopped && retryTimer === undefined)
+        retryTimer = window.setTimeout(() => {
+          retryTimer = undefined;
+          void connectEvents();
+        }, 1_000);
     };
     const refreshSnapshot = async (): Promise<Snapshot> => {
       const current = await api.getSnapshot();
@@ -64,7 +71,9 @@ export function App() {
       }, 5_000);
     };
     controllerControls.current = {
-      setGeneration: (generation) => { controllerGeneration = generation; },
+      setGeneration: (generation) => {
+        controllerGeneration = generation;
+      },
       startRenewal,
     };
     const connectEvents = async (): Promise<void> => {
@@ -97,16 +106,19 @@ export function App() {
         connecting = false;
       }
     };
-    void api.attachController().then((controller) => {
-      if (stopped) return;
-      setControllerRole(controller.role);
-      controllerGeneration = controller.controllerGeneration;
-      if (controller.role === "controller") startRenewal();
-      void connectEvents();
-    }).catch(() => {
-      setControllerRole("observer");
-      void connectEvents();
-    });
+    void api
+      .attachController()
+      .then((controller) => {
+        if (stopped) return;
+        setControllerRole(controller.role);
+        controllerGeneration = controller.controllerGeneration;
+        if (controller.role === "controller") startRenewal();
+        void connectEvents();
+      })
+      .catch(() => {
+        setControllerRole("observer");
+        void connectEvents();
+      });
     return () => {
       stopped = true;
       source?.close();
@@ -172,16 +184,32 @@ export function App() {
       <p className="eyebrow">OPC UA Studio</p>
       <h1>Web workspace ready</h1>
       <p>React is running in the browser.</p>
-      {insecureDevelopment && <p className="warning" role="status">Insecure development mode is enabled. Do not expose this server publicly.</p>}
+      {insecureDevelopment && (
+        <p className="warning" role="status">
+          Insecure development mode is enabled. Do not expose this server publicly.
+        </p>
+      )}
       {authenticated ? (
         <>
           <h2>Troubleshooting Session</h2>
           <p>Authentication succeeded. This browser is ready for OPC UA Studio.</p>
-          <p role="status">{snapshot?.connection.state ?? "disconnected"} · {controllerRole === "controller" ? "Controller" : "Observer"}</p>
-          {controllerRole === "observer" && (snapshot?.controller.recoverable
-            ? <button type="button" onClick={() => void recoverControl()}>Recover control</button>
-            : <button type="button" onClick={() => void takeOver()}>Take over control</button>)}
-          <button type="button" onClick={() => void logout()}>Sign out</button>
+          <p role="status">
+            {snapshot?.connection.state ?? "disconnected"} ·{" "}
+            {controllerRole === "controller" ? "Controller" : "Observer"}
+          </p>
+          {controllerRole === "observer" &&
+            (snapshot?.controller.recoverable ? (
+              <button type="button" onClick={() => void recoverControl()}>
+                Recover control
+              </button>
+            ) : (
+              <button type="button" onClick={() => void takeOver()}>
+                Take over control
+              </button>
+            ))}
+          <button type="button" onClick={() => void logout()}>
+            Sign out
+          </button>
         </>
       ) : (
         <>
@@ -189,17 +217,32 @@ export function App() {
           <form onSubmit={login}>
             <label>
               Username
-              <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required />
+              <input
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                autoComplete="username"
+                required
+              />
             </label>
             <label>
               Admin password
-              <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required />
+              <input
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                autoComplete="current-password"
+                required
+              />
             </label>
             <button type="submit">Sign in</button>
           </form>
         </>
       )}
-      {message && <p className="error" role="alert">{message}</p>}
+      {message && (
+        <p className="error" role="alert">
+          {message}
+        </p>
+      )}
     </main>
   );
 }
