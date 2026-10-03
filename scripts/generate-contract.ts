@@ -130,11 +130,14 @@ function renderClient(contract: JsonObject): string {
         `${expression}.replace("{${parameter.name}}", encodeURIComponent(String(${parameter.name})))`,
       JSON.stringify(route),
     );
+    const singleRequiredQuery = queryParameters.length === 1 && queryParameters[0].required ? queryParameters[0] : undefined;
     const querySetup =
-      queryParameters.length === 0
+      queryParameters.length === 0 || singleRequiredQuery
         ? ""
         : `\n    const query = new URLSearchParams();\n${queryParameters.map((parameter) => `    if (${parameter.name} !== undefined) query.set("${parameter.name}", String(${parameter.name}));`).join("\n")}\n    const route = ${pathExpression} + (query.toString() ? "?" + query.toString() : "");`;
-    const routeArgument = queryParameters.length === 0 ? pathExpression : "route";
+    const routeArgument = singleRequiredQuery
+      ? `${pathExpression} + "?${singleRequiredQuery.name}=" + encodeURIComponent(String(${singleRequiredQuery.name}))`
+      : queryParameters.length === 0 ? pathExpression : "route";
     const body = requestType ? ", JSON.stringify(request)" : "";
     return `  ${name}(${argumentsList.join(", ")}): ${returnType} {${querySetup}\n    return send<${resultType === "void" ? "void" : resultType}>("${method}", ${routeArgument}${body});\n  }`;
   });

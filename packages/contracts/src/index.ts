@@ -376,38 +376,23 @@ export function createApiClient(transport: ContractTransport = defaultTransport,
   },
 
   discoverOpcUaEndpoints(request: EndpointDiscoveryRequest, controllerGeneration: number): Promise<EndpointDiscoveryResult> {
-    const query = new URLSearchParams();
-    if (controllerGeneration !== undefined) query.set("controllerGeneration", String(controllerGeneration));
-    const route = "/api/v1/opcua/discover" + (query.toString() ? "?" + query.toString() : "");
-    return send<EndpointDiscoveryResult>("POST", route, JSON.stringify(request));
+    return send<EndpointDiscoveryResult>("POST", "/api/v1/opcua/discover" + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)), JSON.stringify(request));
   },
 
   connectOpcUa(request: EndpointDiscoveryRequest, controllerGeneration: number): Promise<Snapshot> {
-    const query = new URLSearchParams();
-    if (controllerGeneration !== undefined) query.set("controllerGeneration", String(controllerGeneration));
-    const route = "/api/v1/opcua/connect" + (query.toString() ? "?" + query.toString() : "");
-    return send<Snapshot>("POST", route, JSON.stringify(request));
+    return send<Snapshot>("POST", "/api/v1/opcua/connect" + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)), JSON.stringify(request));
   },
 
   disconnectOpcUa(controllerGeneration: number): Promise<Snapshot> {
-    const query = new URLSearchParams();
-    if (controllerGeneration !== undefined) query.set("controllerGeneration", String(controllerGeneration));
-    const route = "/api/v1/opcua/disconnect" + (query.toString() ? "?" + query.toString() : "");
-    return send<Snapshot>("POST", route);
+    return send<Snapshot>("POST", "/api/v1/opcua/disconnect" + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)));
   },
 
   browseAddressSpace(request: BrowseRequest, controllerGeneration: number): Promise<BrowseResult> {
-    const query = new URLSearchParams();
-    if (controllerGeneration !== undefined) query.set("controllerGeneration", String(controllerGeneration));
-    const route = "/api/v1/address-space/browse" + (query.toString() ? "?" + query.toString() : "");
-    return send<BrowseResult>("POST", route, JSON.stringify(request));
+    return send<BrowseResult>("POST", "/api/v1/address-space/browse" + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)), JSON.stringify(request));
   },
 
   searchAddressSpace(request: SearchRequest, controllerGeneration: number): Promise<SearchResult> {
-    const query = new URLSearchParams();
-    if (controllerGeneration !== undefined) query.set("controllerGeneration", String(controllerGeneration));
-    const route = "/api/v1/address-space/search" + (query.toString() ? "?" + query.toString() : "");
-    return send<SearchResult>("POST", route, JSON.stringify(request));
+    return send<SearchResult>("POST", "/api/v1/address-space/search" + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)), JSON.stringify(request));
   },
 
   getDiagnosticReport(): Promise<DiagnosticReport> {
@@ -427,10 +412,7 @@ export function createApiClient(transport: ContractTransport = defaultTransport,
   },
 
   renewControllerLease(controllerGeneration: number): Promise<void> {
-    const query = new URLSearchParams();
-    if (controllerGeneration !== undefined) query.set("controllerGeneration", String(controllerGeneration));
-    const route = "/api/v1/controller/renew" + (query.toString() ? "?" + query.toString() : "");
-    return send<void>("POST", route);
+    return send<void>("POST", "/api/v1/controller/renew" + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)));
   },
 
   prepareMutation(request: PrepareMutationRequest): Promise<PrepareMutationResponse> {

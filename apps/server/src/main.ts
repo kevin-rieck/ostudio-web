@@ -10,15 +10,6 @@ import type {
 } from "@ostudio/contracts";
 import { createServer, type WebServer } from "./server.js";
 
-function displayValue(value: unknown): string {
-  if (typeof value === "string") return value.slice(0, 4096);
-  try {
-    return JSON.stringify(value)?.slice(0, 4096) ?? "";
-  } catch {
-    return "[value unavailable]";
-  }
-}
-
 function snapshotForTransport(source: ApplicationSnapshot): Snapshot {
   const nodeMap = new Map<string, AddressSpaceNode>();
   for (const result of source.search.results) {
@@ -27,22 +18,6 @@ function snapshotForTransport(source: ApplicationSnapshot): Snapshot {
       nodeClass: (result.nodeClass === "Unspecified" ? "Object" : result.nodeClass) as AddressSpaceNode["nodeClass"],
       browseName: result.browseName ?? result.nodeId,
       displayName: result.displayName ?? result.browseName ?? result.nodeId,
-      ...(source.inspections[result.nodeId]?.value
-        ? {
-            liveValue: {
-              displayValue: displayValue(source.inspections[result.nodeId]!.value!.value?.value),
-              status: source.inspections[result.nodeId]!.value!.status.name,
-              ...(source.inspections[result.nodeId]!.value!.sourceTimestamp
-                ? { sourceTimestamp: source.inspections[result.nodeId]!.value!.sourceTimestamp }
-                : {}),
-              ...(source.inspections[result.nodeId]!.value!.serverTimestamp
-                ? { serverTimestamp: source.inspections[result.nodeId]!.value!.serverTimestamp }
-                : {}),
-              stale: source.inspections[result.nodeId]!.stale,
-              ...(source.inspections[result.nodeId]!.outOfRange ? { outOfRange: true } : {}),
-            },
-          }
-        : {}),
     });
   }
   for (const reference of source.browsed?.references ?? []) {
