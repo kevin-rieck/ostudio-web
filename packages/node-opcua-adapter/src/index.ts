@@ -795,7 +795,8 @@ class NodeOpcuaAdapter implements OpcUaClient {
         applicationName: server.applicationName ? projectLocalizedText(server.applicationName) : undefined,
         discoveryUrls: (server.discoveryUrls ?? [])
           .filter((url): url is string => typeof url === "string" && safeAdvertisedUrl(url, request.endpointUrl) !== undefined)
-          .slice(0, 32),
+          .slice(0, 32)
+          .map(() => request.endpointUrl),
       })),
       endpoints: result.endpoints
         .filter((endpoint) => safeAdvertisedUrl(endpoint.endpointUrl ?? "", request.endpointUrl) !== undefined)
@@ -813,7 +814,7 @@ class NodeOpcuaAdapter implements OpcUaClient {
     const policy = request.securityPolicyUri ?? SecurityPolicy.None;
     const selectedRaw = discovered.endpoints.find(
       (endpoint) =>
-        endpoint.endpointUrl === request.endpointUrl &&
+        safeAdvertisedUrl(endpoint.endpointUrl ?? "", request.endpointUrl) !== undefined &&
         endpoint.securityMode === securityMode(mode) &&
         endpoint.securityPolicyUri === policy,
     );
@@ -845,7 +846,7 @@ class NodeOpcuaAdapter implements OpcUaClient {
     const rawClient = this.createRawClient({
       securityMode: securityMode(mode),
       securityPolicy: securityPolicy(policy),
-      endpointMustExist: true,
+      endpointMustExist: selectedRaw.endpointUrl === request.endpointUrl,
       ...(selectedRaw?.serverCertificate ? { serverCertificate: selectedRaw.serverCertificate } : {}),
     });
     let lossNotified = false;
@@ -863,7 +864,7 @@ class NodeOpcuaAdapter implements OpcUaClient {
           notifyLoss({ code: "session_closed", message: "The OPC UA connection was closed." });
         }
       });
-      await withDeadline(rawClient.connect(selected.endpointUrl), this.connectTimeout);
+      await withDeadline(rawClient.connect(request.endpointUrl), this.connectTimeout);
       const rawSession = await withDeadline(
         rawClient.createSession(
           request.userIdentity ? this.userIdentity(request.userIdentity) : { type: UserTokenType.Anonymous },

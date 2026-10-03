@@ -95,6 +95,8 @@ describe("node-opcua transport projection", () => {
   it("does not expose unrequested advertised endpoint URLs", () => {
     expect(safeAdvertisedUrl("opc.tcp://admin:secret@10.0.0.4:4840/C:/certs/client.key", "opc.tcp://plc.example:4840")).toBeUndefined();
     expect(safeAdvertisedUrl("opc.tcp://plc.example:4840", "opc.tcp://plc.example:4840")).toBe("opc.tcp://plc.example:4840");
+    expect(safeAdvertisedUrl("opc.tcp://internal-host:4840", "opc.tcp://plc.example:4840")).toBe("opc.tcp://plc.example:4840");
+    expect(safeAdvertisedUrl("opc.tcp://internal-host:4841", "opc.tcp://plc.example:4840")).toBeUndefined();
   });
 
   it("bounds projected discovery strings and reference identifiers", () => {
