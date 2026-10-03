@@ -27,7 +27,9 @@ export function App() {
   const [browseNodeId, setBrowseNodeId] = useState("i=84");
   const [searchQuery, setSearchQuery] = useState("");
   const [working, setWorking] = useState(false);
-  const controllerControls = useRef<{ setGeneration(generation: number): void; startRenewal(): void } | undefined>(undefined);
+  const controllerControls = useRef<{ setGeneration(generation: number): void; startRenewal(): void } | undefined>(
+    undefined,
+  );
 
   useEffect(() => {
     void api
@@ -104,7 +106,12 @@ export function App() {
         connecting = false;
       }
     };
-    controllerControls.current = { setGeneration: (generation) => { controllerGeneration = generation; }, startRenewal };
+    controllerControls.current = {
+      setGeneration: (generation) => {
+        controllerGeneration = generation;
+      },
+      startRenewal,
+    };
     void api
       .attachController()
       .then((controller) => {
@@ -167,7 +174,10 @@ export function App() {
       return;
     }
     await withWorking(async () => {
-      const current = await api.connectOpcUa({ endpointUrl: selected.endpointUrl }, snapshot!.controller.controllerGeneration);
+      const current = await api.connectOpcUa(
+        { endpointUrl: selected.endpointUrl },
+        snapshot!.controller.controllerGeneration,
+      );
       setSnapshot(current);
     }, "The OPC UA Server connection failed.");
   }
@@ -181,23 +191,17 @@ export function App() {
   }
 
   async function browse(): Promise<void> {
-    await withWorking(
-      async () => {
-        await api.browseAddressSpace({ nodeId: browseNodeId }, snapshot!.controller.controllerGeneration);
-        setSnapshot(await api.getSnapshot());
-      },
-      "Address Space browsing failed.",
-    );
+    await withWorking(async () => {
+      await api.browseAddressSpace({ nodeId: browseNodeId }, snapshot!.controller.controllerGeneration);
+      setSnapshot(await api.getSnapshot());
+    }, "Address Space browsing failed.");
   }
 
   async function search(): Promise<void> {
-    await withWorking(
-      async () => {
-        await api.searchAddressSpace({ query: searchQuery }, snapshot!.controller.controllerGeneration);
-        setSnapshot(await api.getSnapshot());
-      },
-      "Address Space Search failed.",
-    );
+    await withWorking(async () => {
+      await api.searchAddressSpace({ query: searchQuery }, snapshot!.controller.controllerGeneration);
+      setSnapshot(await api.getSnapshot());
+    }, "Address Space Search failed.");
   }
 
   async function recoverControl(): Promise<void> {
@@ -253,7 +257,9 @@ export function App() {
               </button>
             ))}
           {snapshot?.connection.state === "connected" && snapshot.connection.identityStatus === "unverified" && (
-            <p className="warning" role="alert">SecurityPolicy None: OPC UA Server identity is unverified.</p>
+            <p className="warning" role="alert">
+              SecurityPolicy None: OPC UA Server identity is unverified.
+            </p>
           )}
           {controllerRole === "controller" && (
             <section aria-labelledby="connection-heading">
@@ -296,7 +302,11 @@ export function App() {
           )}
           {controllerRole === "observer" && snapshot?.nodes.length ? (
             <section aria-label="Address Space">
-              <ul>{snapshot.nodes.map((node) => <li key={node.nodeId}>{node.displayName}</li>)}</ul>
+              <ul>
+                {snapshot.nodes.map((node) => (
+                  <li key={node.nodeId}>{node.displayName}</li>
+                ))}
+              </ul>
             </section>
           ) : null}
           {controllerRole === "controller" && snapshot?.connection.state === "connected" && (
@@ -335,23 +345,31 @@ export function App() {
               </div>
               {snapshot.search && (
                 <>
-                  <p role="status">{snapshot.search.results.length} result(s); coverage {snapshot.search.coverage}.</p>
-                  <ul aria-label="Search matches">{snapshot.search.results.map((match) => (
-                    <li key={match.nodeId}>
-                      <button type="button" onClick={() => setBrowseNodeId(match.nodeId)}>
-                        {match.displayName ?? match.browseName ?? match.nodeId}
-                      </button>
-                    </li>
-                  ))}</ul>
+                  <p role="status">
+                    {snapshot.search.results.length} result(s); coverage {snapshot.search.coverage}.
+                  </p>
+                  <ul aria-label="Search matches">
+                    {snapshot.search.results.map((match) => (
+                      <li key={match.nodeId}>
+                        <button type="button" onClick={() => setBrowseNodeId(match.nodeId)}>
+                          {match.displayName ?? match.browseName ?? match.nodeId}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
                 </>
               )}
             </section>
           )}
           {diagnostics.length > 0 && (
             <section aria-label="Diagnostics">
-              <ul>{diagnostics.map((record, index) => (
-                <li key={index}>{"code" in record ? record.code : record.outcome} · {record.endpoint ?? "OPC UA Server"}</li>
-              ))}</ul>
+              <ul>
+                {diagnostics.map((record, index) => (
+                  <li key={index}>
+                    {"code" in record ? record.code : record.outcome} · {record.endpoint ?? "OPC UA Server"}
+                  </li>
+                ))}
+              </ul>
             </section>
           )}
           <button type="button" onClick={() => void logout()} disabled={working}>

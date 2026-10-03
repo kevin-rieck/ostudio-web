@@ -144,10 +144,15 @@ describe("production node-opcua adapter", () => {
   it("connects using a requested hostname when the server advertises another", async () => {
     const requested = endpointUrl.replace("127.0.0.1", "localhost");
     expect(requested).not.toBe(endpointUrl);
-    const client = createNodeOpcuaAdapter({ applicationName: "OPC UA Studio hostname test", applicationUri: "urn:ostudio:hostname-test" });
+    const client = createNodeOpcuaAdapter({
+      applicationName: "OPC UA Studio hostname test",
+      applicationUri: "urn:ostudio:hostname-test",
+    });
     try {
       const discovery = await client.discover({ endpointUrl: requested });
-      expect(discovery.endpoints.some((endpoint) => endpoint.endpointUrl === requested && endpoint.securityMode === "None")).toBe(true);
+      expect(
+        discovery.endpoints.some((endpoint) => endpoint.endpointUrl === requested && endpoint.securityMode === "None"),
+      ).toBe(true);
       expect(JSON.stringify(discovery)).not.toContain("127.0.0.1");
       await expect(client.connect({ endpointUrl: requested, securityMode: "None" })).resolves.toBeDefined();
     } finally {

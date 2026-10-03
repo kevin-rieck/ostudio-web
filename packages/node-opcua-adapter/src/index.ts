@@ -794,7 +794,10 @@ class NodeOpcuaAdapter implements OpcUaClient {
         productUri: boundedString(server.productUri ?? ""),
         applicationName: server.applicationName ? projectLocalizedText(server.applicationName) : undefined,
         discoveryUrls: (server.discoveryUrls ?? [])
-          .filter((url): url is string => typeof url === "string" && safeAdvertisedUrl(url, request.endpointUrl) !== undefined)
+          .filter(
+            (url): url is string =>
+              typeof url === "string" && safeAdvertisedUrl(url, request.endpointUrl) !== undefined,
+          )
           .slice(0, 32)
           .map(() => request.endpointUrl),
       })),

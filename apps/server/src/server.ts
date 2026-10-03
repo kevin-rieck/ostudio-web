@@ -262,16 +262,23 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   let recoverableControllerSessionId: string | undefined;
   let controllerGeneration = 0;
   const diagnostics: ConnectionDiagnostic[] = [];
-  const recordConnectionDiagnostic = (record: Pick<ConnectionDiagnostic, "code" | "outcome"> & { endpoint?: string }): void => {
+  const recordConnectionDiagnostic = (
+    record: Pick<ConnectionDiagnostic, "code" | "outcome"> & { endpoint?: string },
+  ): void => {
     let endpoint = "OPC UA Server";
     try {
       if (record.endpoint) {
         const url = new URL(record.endpoint);
         if (url.protocol === "opc.tcp:") endpoint = `${url.protocol}//${url.host}`.slice(0, 256);
       }
-    } catch { /* No untrusted endpoint text reaches diagnostics. */ }
+    } catch {
+      /* No untrusted endpoint text reaches diagnostics. */
+    }
     diagnostics.push({
-      code: record.code, actor: "admin", endpoint, controllerGeneration,
+      code: record.code,
+      actor: "admin",
+      endpoint,
+      controllerGeneration,
       operationId: `op-${randomBytes(16).toString("hex")}`,
       correlationId: `cor-${randomBytes(16).toString("hex")}`,
       outcome: record.outcome,
@@ -419,7 +426,9 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     publishEvent("ownership-changed", { role: "controller", controllerGeneration });
   };
   const revokeController = (): Promise<void> =>
-    commandInFlight && controllerOwner !== undefined ? revokeControllerState() : serializeControl(revokeControllerState);
+    commandInFlight && controllerOwner !== undefined
+      ? revokeControllerState()
+      : serializeControl(revokeControllerState);
   const revokeExpiredController = async (): Promise<void> => {
     try {
       await revokeController();
@@ -691,23 +700,37 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     });
   });
   let commandInFlight = false;
-  const controllerCommand = async <T>(request: FastifyRequest, reply: FastifyReply, operation: () => Promise<T>, connectionChange = false): Promise<T | undefined> =>
+  const controllerCommand = async <T>(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    operation: () => Promise<T>,
+    connectionChange = false,
+  ): Promise<T | undefined> =>
     serializeControl(async () => {
       const session = (request as RequestWithSession).authSession!;
       const generation = Number(new URL(request.url, config.publicOrigin).searchParams.get("controllerGeneration"));
       if (controllerOwner === session.id && controllerLeaseExpiresAt !== undefined && now() >= controllerLeaseExpiresAt)
         await revokeControllerState();
       if (controllerOwner !== session.id || !Number.isSafeInteger(generation) || generation !== controllerGeneration) {
-        void reply.code(409).send(errorBody("controller_generation_mismatch", "The controller lease is no longer current."));
+        void reply
+          .code(409)
+          .send(errorBody("controller_generation_mismatch", "The controller lease is no longer current."));
         return;
       }
       commandInFlight = true;
       try {
         const result = await operation();
-        if (controllerOwner !== session.id || generation !== controllerGeneration || controllerLeaseExpiresAt === undefined || now() >= controllerLeaseExpiresAt) {
+        if (
+          controllerOwner !== session.id ||
+          generation !== controllerGeneration ||
+          controllerLeaseExpiresAt === undefined ||
+          now() >= controllerLeaseExpiresAt
+        ) {
           if (controllerOwner === session.id) await revokeControllerState();
           if (connectionChange) await disconnectRuntime("Unable to disconnect the runtime after controller loss.");
-          void reply.code(409).send(errorBody("controller_generation_mismatch", "The controller lease is no longer current."));
+          void reply
+            .code(409)
+            .send(errorBody("controller_generation_mismatch", "The controller lease is no longer current."));
           return;
         }
         return result;
@@ -742,64 +765,79 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   ): void => {
     void reply.code(502).send(errorBody(code, "The OPC UA operation could not be completed."));
   };
-  server.post("/api/v1/opcua/discover", async (request, reply) => controllerCommand(request, reply, async () => {
-    const body = endpointRequest(request);
-    if (!body) return void reply.code(400).send(errorBody("bad_request", "The endpoint URL is invalid."));
-    if (!options.runtime?.discover) return runtimeError(reply, "discovery_failed");
-    try {
-      return await options.runtime.discover(body);
-    } catch {
-      return runtimeError(reply, "discovery_failed");
-    }
-  }));
-  server.post("/api/v1/opcua/connect", async (request, reply) => controllerCommand(request, reply, async () => {
-    const body = endpointRequest(request);
-    if (!body) return void reply.code(400).send(errorBody("bad_request", "The endpoint URL is invalid."));
-    if (!options.runtime?.connect) return runtimeError(reply, "connection_failed");
-    try {
-      await options.runtime.connect(body);
-      return currentSnapshot(request);
-    } catch {
-      return runtimeError(reply, "connection_failed");
-    }
-  }, true));
-  server.post("/api/v1/opcua/disconnect", async (request, reply) => controllerCommand(request, reply, async () => {
-    if (!options.runtime?.disconnect) return runtimeError(reply, "operation_failed");
-    try {
-      await restoreReadOnly();
-      await options.runtime.disconnect();
-      publishEvent("connection-changed", { state: "disconnected" });
-      return currentSnapshot(request);
-    } catch {
-      return runtimeError(reply, "operation_failed");
-    }
-  }));
-  server.post("/api/v1/address-space/browse", async (request, reply) => controllerCommand(request, reply, async () => {
-    const body = requestBody<BrowseRequest>(request);
-    if (!body || typeof body.nodeId !== "string" || body.nodeId.length === 0 || body.nodeId.length > 512)
-      return void reply.code(400).send(errorBody("bad_request", "The Address Space node identifier is invalid."));
-    if (!options.runtime?.browse) return runtimeError(reply, "operation_failed");
-    try {
-      const result = await options.runtime.browse({ nodeId: body.nodeId });
-      publishEvent("snapshot-required", { reason: "reconnect" });
-      return result;
-    } catch {
-      return runtimeError(reply, "operation_failed");
-    }
-  }));
-  server.post("/api/v1/address-space/search", async (request, reply) => controllerCommand(request, reply, async () => {
-    const body = requestBody<{ query: string }>(request);
-    if (!body || typeof body.query !== "string" || body.query.length > 256)
-      return void reply.code(400).send(errorBody("bad_request", "The Address Space Search query is invalid."));
-    if (!options.runtime?.search) return runtimeError(reply, "operation_failed");
-    try {
-      const result = await options.runtime.search({ query: body.query });
-      publishEvent("snapshot-required", { reason: "reconnect" });
-      return result;
-    } catch {
-      return runtimeError(reply, "operation_failed");
-    }
-  }));
+  server.post("/api/v1/opcua/discover", async (request, reply) =>
+    controllerCommand(request, reply, async () => {
+      const body = endpointRequest(request);
+      if (!body) return void reply.code(400).send(errorBody("bad_request", "The endpoint URL is invalid."));
+      if (!options.runtime?.discover) return runtimeError(reply, "discovery_failed");
+      try {
+        return await options.runtime.discover(body);
+      } catch {
+        return runtimeError(reply, "discovery_failed");
+      }
+    }),
+  );
+  server.post("/api/v1/opcua/connect", async (request, reply) =>
+    controllerCommand(
+      request,
+      reply,
+      async () => {
+        const body = endpointRequest(request);
+        if (!body) return void reply.code(400).send(errorBody("bad_request", "The endpoint URL is invalid."));
+        if (!options.runtime?.connect) return runtimeError(reply, "connection_failed");
+        try {
+          await options.runtime.connect(body);
+          return currentSnapshot(request);
+        } catch {
+          return runtimeError(reply, "connection_failed");
+        }
+      },
+      true,
+    ),
+  );
+  server.post("/api/v1/opcua/disconnect", async (request, reply) =>
+    controllerCommand(request, reply, async () => {
+      if (!options.runtime?.disconnect) return runtimeError(reply, "operation_failed");
+      try {
+        await restoreReadOnly();
+        await options.runtime.disconnect();
+        publishEvent("connection-changed", { state: "disconnected" });
+        return currentSnapshot(request);
+      } catch {
+        return runtimeError(reply, "operation_failed");
+      }
+    }),
+  );
+  server.post("/api/v1/address-space/browse", async (request, reply) =>
+    controllerCommand(request, reply, async () => {
+      const body = requestBody<BrowseRequest>(request);
+      if (!body || typeof body.nodeId !== "string" || body.nodeId.length === 0 || body.nodeId.length > 512)
+        return void reply.code(400).send(errorBody("bad_request", "The Address Space node identifier is invalid."));
+      if (!options.runtime?.browse) return runtimeError(reply, "operation_failed");
+      try {
+        const result = await options.runtime.browse({ nodeId: body.nodeId });
+        publishEvent("snapshot-required", { reason: "reconnect" });
+        return result;
+      } catch {
+        return runtimeError(reply, "operation_failed");
+      }
+    }),
+  );
+  server.post("/api/v1/address-space/search", async (request, reply) =>
+    controllerCommand(request, reply, async () => {
+      const body = requestBody<{ query: string }>(request);
+      if (!body || typeof body.query !== "string" || body.query.length > 256)
+        return void reply.code(400).send(errorBody("bad_request", "The Address Space Search query is invalid."));
+      if (!options.runtime?.search) return runtimeError(reply, "operation_failed");
+      try {
+        const result = await options.runtime.search({ query: body.query });
+        publishEvent("snapshot-required", { reason: "reconnect" });
+        return result;
+      } catch {
+        return runtimeError(reply, "operation_failed");
+      }
+    }),
+  );
   server.get("/api/v1/diagnostics", async () => diagnostics);
   server.get("/api/v1/events", async (request, reply) => {
     const rawAfter = new URL(request.url, config.publicOrigin).searchParams.get("afterSequence");

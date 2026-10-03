@@ -33,9 +33,21 @@ export function safeAdvertisedUrl(advertised: string, requested: string): string
   try {
     const url = new URL(advertised);
     const expected = new URL(requested);
-    if (url.protocol !== "opc.tcp:" || url.username || url.password || url.search || url.hash ||
-        expected.username || expected.password || expected.search || expected.hash ||
-        url.port !== expected.port || url.pathname !== expected.pathname || advertised.length > 4_096) return undefined;
+    if (
+      url.protocol !== "opc.tcp:" ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      expected.username ||
+      expected.password ||
+      expected.search ||
+      expected.hash ||
+      url.port !== expected.port ||
+      url.pathname !== expected.pathname ||
+      advertised.length > 4_096
+    )
+      return undefined;
     return requested;
   } catch {
     return undefined;

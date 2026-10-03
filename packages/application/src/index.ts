@@ -920,10 +920,19 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
         const currentSession = requireSession();
         const generation = state.connection.connectionGeneration;
         if (browseRequests >= config.shallowBrowseRequestBudget) {
-          update((current) => ({ ...current, search: { ...current.search, coverage: "incomplete" } }), "search-changed");
+          update(
+            (current) => ({ ...current, search: { ...current.search, coverage: "incomplete" } }),
+            "search-changed",
+          );
           return state.browsed?.nodeId === request.nodeId
             ? { ...state.browsed, truncated: true }
-            : { nodeId: request.nodeId, references: [], status: { name: "Good", value: 0 }, requests: 0, truncated: true };
+            : {
+                nodeId: request.nodeId,
+                references: [],
+                status: { name: "Good", value: 0 },
+                requests: 0,
+                truncated: true,
+              };
         }
         const now = dependencies.clock.now().getTime();
         if (lastShallowBrowseAt !== undefined && now - lastShallowBrowseAt < config.shallowBrowseIntervalMilliseconds)
@@ -933,7 +942,13 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
         const result = await currentSession.browse({ ...request, maxRequests: 1 });
         if (session !== currentSession || state.connection.connectionGeneration !== generation)
           throw new ApplicationError("connection_required", "The OPC UA connection changed during browsing.");
-        update((current) => ({ ...current, search: { ...current.search, requests: browseRequests, coverage: "incomplete" } }), "search-changed");
+        update(
+          (current) => ({
+            ...current,
+            search: { ...current.search, requests: browseRequests, coverage: "incomplete" },
+          }),
+          "search-changed",
+        );
         const distance = (shallowBrowseDistances.get(request.nodeId) ?? indexed.get(request.nodeId)?.distance ?? 0) + 1;
         update((current) => ({ ...current, browsed: result }), "search-changed");
         for (const reference of result.references) {
@@ -998,7 +1013,8 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
         ...state.search,
         results: matches.slice(0, 10_000),
         coverage:
-          matches.length > 10_000 || incompleteCoverage ||
+          matches.length > 10_000 ||
+          incompleteCoverage ||
           state.search.coverage === "incomplete" ||
           (session !== undefined && shallowBrowseQueue.length > 0)
             ? ("incomplete" as const)

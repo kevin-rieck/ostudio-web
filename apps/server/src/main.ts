@@ -23,7 +23,9 @@ function snapshotForTransport(source: ApplicationSnapshot): Snapshot {
   for (const reference of source.browsed?.references ?? []) {
     nodeMap.set(reference.nodeId, {
       nodeId: reference.nodeId,
-      nodeClass: (reference.nodeClass === "Unspecified" ? "Object" : reference.nodeClass) as AddressSpaceNode["nodeClass"],
+      nodeClass: (reference.nodeClass === "Unspecified"
+        ? "Object"
+        : reference.nodeClass) as AddressSpaceNode["nodeClass"],
       browseName: reference.browseName.name ?? reference.nodeId,
       displayName: reference.displayName.text ?? reference.browseName.name ?? reference.nodeId,
     });
@@ -51,13 +53,15 @@ export async function start(): Promise<void> {
   const serverRef: { current?: WebServer } = {};
   const application: ApplicationFacade = createApplication({
     clock: { now: () => new Date() },
-    events: { publish: (event) => {
-      if (event.type === "diagnostic-changed") {
-        const record = event.snapshot.diagnostics.at(-1);
-        if (record) serverRef.current?.recordConnectionDiagnostic(record);
-      }
-      serverRef.current?.publishEvent("snapshot-required", { reason: "reconnect" });
-    } },
+    events: {
+      publish: (event) => {
+        if (event.type === "diagnostic-changed") {
+          const record = event.snapshot.diagnostics.at(-1);
+          if (record) serverRef.current?.recordConnectionDiagnostic(record);
+        }
+        serverRef.current?.publishEvent("snapshot-required", { reason: "reconnect" });
+      },
+    },
     clientFactory: (options) => createNodeOpcuaAdapter(options),
     savedConnections: { list: async () => [], save: async () => undefined },
   });
