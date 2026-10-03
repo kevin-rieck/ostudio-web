@@ -1,8 +1,101 @@
 import { pathToFileURL } from "node:url";
-import { createServer } from "./server.js";
+import { createApplication, type ApplicationFacade, type ApplicationSnapshot } from "@ostudio/application";
+import { createNodeOpcuaAdapter } from "@ostudio/node-opcua-adapter";
+import type {
+  AddressSpaceNode,
+  BrowseResult,
+  EndpointDiscoveryResult,
+  SearchResult,
+  Snapshot,
+} from "@ostudio/contracts";
+import { createServer, type WebServer } from "./server.js";
+
+function displayValue(value: unknown): string {
+  if (typeof value === "string") return value.slice(0, 4096);
+  try {
+    return JSON.stringify(value)?.slice(0, 4096) ?? "";
+  } catch {
+    return "[value unavailable]";
+  }
+}
+
+function snapshotForTransport(source: ApplicationSnapshot): Snapshot {
+  const nodeMap = new Map<string, AddressSpaceNode>();
+  for (const result of source.search.results) {
+    nodeMap.set(result.nodeId, {
+      nodeId: result.nodeId,
+      nodeClass: (result.nodeClass === "Unspecified" ? "Object" : result.nodeClass) as AddressSpaceNode["nodeClass"],
+      browseName: result.browseName ?? result.nodeId,
+      displayName: result.displayName ?? result.browseName ?? result.nodeId,
+      ...(source.inspections[result.nodeId]?.value
+        ? {
+            liveValue: {
+              displayValue: displayValue(source.inspections[result.nodeId]!.value!.value?.value),
+              status: source.inspections[result.nodeId]!.value!.status.name,
+              ...(source.inspections[result.nodeId]!.value!.sourceTimestamp
+                ? { sourceTimestamp: source.inspections[result.nodeId]!.value!.sourceTimestamp }
+                : {}),
+              ...(source.inspections[result.nodeId]!.value!.serverTimestamp
+                ? { serverTimestamp: source.inspections[result.nodeId]!.value!.serverTimestamp }
+                : {}),
+              stale: source.inspections[result.nodeId]!.stale,
+              ...(source.inspections[result.nodeId]!.outOfRange ? { outOfRange: true } : {}),
+            },
+          }
+        : {}),
+    });
+  }
+  for (const reference of source.browsed?.references ?? []) {
+    nodeMap.set(reference.nodeId, {
+      nodeId: reference.nodeId,
+      nodeClass: (reference.nodeClass === "Unspecified" ? "Object" : reference.nodeClass) as AddressSpaceNode["nodeClass"],
+      browseName: reference.browseName.name ?? reference.nodeId,
+      displayName: reference.displayName.text ?? reference.browseName.name ?? reference.nodeId,
+    });
+  }
+  return {
+    sequence: 0,
+    buildVersion: process.env.OSTUDIO_BUILD_VERSION ?? "0.0.0",
+    generatedAt: new Date().toISOString(),
+    controller: { role: "controller", controllerGeneration: 0 },
+    safety: source.safety,
+    connection: {
+      state: source.connection.state === "connection-lost" ? "lost" : source.connection.state,
+      ...(source.connection.endpointUrl ? { endpoint: source.connection.endpointUrl } : {}),
+      ...(source.connection.securityPolicy ? { securityPolicy: source.connection.securityPolicy } : {}),
+      ...(source.connection.securityMode ? { securityMode: source.connection.securityMode } : {}),
+      ...(source.connection.identityStatus ? { identityStatus: source.connection.identityStatus } : {}),
+    },
+    nodes: [...nodeMap.values()],
+  };
+}
 
 export async function start(): Promise<void> {
-  const server = await createServer();
+  const serverRef: { current?: WebServer } = {};
+  const application: ApplicationFacade = createApplication({
+    clock: { now: () => new Date() },
+    events: { publish: () => serverRef.current?.publishEvent("snapshot-required", { reason: "reconnect" }) },
+    clientFactory: (options) => createNodeOpcuaAdapter(options),
+    savedConnections: { list: async () => [], save: async () => undefined },
+  });
+  const runtime = {
+    snapshot: (): Snapshot => snapshotForTransport(application.snapshot()),
+    diagnostics: () => application.snapshot().diagnostics,
+    discover: (request: { endpointUrl: string }): Promise<EndpointDiscoveryResult> => application.discover(request),
+    connect: (request: { endpointUrl: string }): Promise<void> =>
+      application.connect({
+        endpointUrl: request.endpointUrl,
+        securityMode: "None",
+        userIdentity: { type: "anonymous" },
+      }),
+    browse: (request: { nodeId: string }): Promise<BrowseResult> => application.browse(request),
+    search: (request: { query: string }): Promise<SearchResult> => application.search(request.query),
+    setReadOnly: (readOnly: true): Promise<void> => application.setReadOnly(readOnly),
+    disconnect: (): Promise<void> => application.disconnect(),
+    close: (): Promise<void> => application.close(),
+  };
+  const server = await createServer({ runtime });
+  serverRef.current = server;
   const port = Number.parseInt(process.env.PORT ?? "8080", 10);
   await server.listen({ host: "0.0.0.0", port });
   let stopping = false;

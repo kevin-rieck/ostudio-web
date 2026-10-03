@@ -788,7 +788,7 @@ class NodeOpcuaAdapter implements OpcUaClient {
   async discover(request: OpcUaDiscoveryRequest): Promise<OpcUaDiscoveryResult> {
     const result = await this.discoverRaw(request.endpointUrl);
     return {
-      servers: result.servers.map((server) => ({
+      servers: result.servers.slice(0, 32).map((server) => ({
         applicationUri: boundedString(server.applicationUri ?? ""),
         productUri: boundedString(server.productUri ?? ""),
         applicationName: server.applicationName ? projectLocalizedText(server.applicationName) : undefined,
@@ -797,7 +797,7 @@ class NodeOpcuaAdapter implements OpcUaClient {
           .slice(0, 32)
           .map(boundedString),
       })),
-      endpoints: result.endpoints.map(endpointProjection),
+      endpoints: result.endpoints.slice(0, 256).map(endpointProjection),
     };
   }
 

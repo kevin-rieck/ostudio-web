@@ -18,7 +18,91 @@ export interface ApiError {
   retryable?: boolean;
 }
 
-export type ErrorCode = "authentication_required" | "bad_request" | "internal_error" | "confirmation_required" | "controller_required" | "controller_generation_mismatch" | "challenge_expired" | "connection_required" | "mutation_not_allowed" | "operation_id_limit_reached" | "operation_result_unavailable" | "origin_rejected" | "request_too_large" | "safety_generation_mismatch" | "watchlist_limit_reached" | "browse_budget_exhausted";
+export type ErrorCode = "authentication_required" | "bad_request" | "internal_error" | "confirmation_required" | "controller_required" | "controller_generation_mismatch" | "challenge_expired" | "connection_required" | "mutation_not_allowed" | "operation_id_limit_reached" | "operation_result_unavailable" | "origin_rejected" | "request_too_large" | "safety_generation_mismatch" | "watchlist_limit_reached" | "browse_budget_exhausted" | "discovery_failed" | "connection_failed" | "operation_failed";
+
+export interface EndpointDiscoveryRequest {
+  endpointUrl: string;
+}
+
+export interface EndpointDiscoveryResult {
+  servers: ServerDescription[];
+  endpoints: DiscoveredEndpoint[];
+}
+
+export interface ServerDescription {
+  applicationUri: string;
+  productUri: string;
+  applicationName?: LocalizedText;
+  discoveryUrls: string[];
+}
+
+export interface LocalizedText {
+  locale?: string;
+  text?: string;
+}
+
+export interface DiscoveredEndpoint {
+  endpointUrl: string;
+  securityMode: "None" | "Sign" | "SignAndEncrypt";
+  securityPolicyUri: string;
+  serverCertificateFingerprint?: string;
+}
+
+export interface BrowseRequest {
+  nodeId: string;
+}
+
+export interface BrowseResult {
+  nodeId: string;
+  references: AddressSpaceReference[];
+  status: StatusCode;
+  requests: number;
+  truncated: boolean;
+}
+
+export interface AddressSpaceReference {
+  nodeId: string;
+  browseName: QualifiedName;
+  displayName: LocalizedText;
+  nodeClass: "Object" | "Variable" | "Method" | "View" | "DataType" | "ReferenceType" | "ObjectType" | "VariableType" | "Unspecified";
+  referenceTypeId?: string;
+  typeDefinition?: string;
+  isForward: boolean;
+}
+
+export interface QualifiedName {
+  namespaceIndex: number;
+  name?: string;
+}
+
+export interface StatusCode {
+  name: string;
+  value: number;
+  description?: string;
+}
+
+export interface SearchRequest {
+  query: string;
+}
+
+export interface SearchResult {
+  results: SearchMatch[];
+  coverage: "complete" | "incomplete";
+  requests: number;
+  budget: number;
+}
+
+export interface SearchMatch {
+  nodeId: string;
+  aliasNames?: string[];
+  browseName?: string;
+  displayName?: string;
+  explicitBrowse?: boolean;
+  distance?: number;
+  nodeClass?: "Object" | "Variable" | "Method" | "View" | "DataType" | "ReferenceType" | "ObjectType" | "VariableType" | "Unspecified";
+  score: number;
+  match: "alias-exact" | "browse-exact" | "display-exact" | "prefix" | "substring";
+}
 
 export interface BuildInfo {
   buildVersion: string;
@@ -123,7 +207,13 @@ export interface LiveValueChangedPayload {
   liveValue: LiveValue;
 }
 
-export type DiagnosticReport = DiagnosticRecord[];
+export type DiagnosticReport = (DiagnosticRecord | ConnectionDiagnostic)[];
+
+export interface ConnectionDiagnostic {
+  code: "connection_failed" | "connection_lost";
+  endpoint?: string;
+  outcome: "unknown";
+}
 
 export interface DiagnosticRecord {
   actor: string;
@@ -214,6 +304,11 @@ export interface ApiClient {
   getBuildInfo(): Promise<BuildInfo>;
   getSnapshot(): Promise<Snapshot>;
   attachEvents(afterSequence?: number): Promise<void>;
+  discoverOpcUaEndpoints(request: EndpointDiscoveryRequest, controllerGeneration: number): Promise<EndpointDiscoveryResult>;
+  connectOpcUa(request: EndpointDiscoveryRequest, controllerGeneration: number): Promise<Snapshot>;
+  disconnectOpcUa(controllerGeneration: number): Promise<Snapshot>;
+  browseAddressSpace(request: BrowseRequest, controllerGeneration: number): Promise<BrowseResult>;
+  searchAddressSpace(request: SearchRequest, controllerGeneration: number): Promise<SearchResult>;
   getDiagnosticReport(): Promise<DiagnosticReport>;
   attachController(): Promise<ControllerState>;
   recoverController(): Promise<ControllerState>;
@@ -278,6 +373,41 @@ export function createApiClient(transport: ContractTransport = defaultTransport,
     if (afterSequence !== undefined) query.set("afterSequence", String(afterSequence));
     const route = "/api/v1/events" + (query.toString() ? "?" + query.toString() : "");
     return send<void>("GET", route);
+  },
+
+  discoverOpcUaEndpoints(request: EndpointDiscoveryRequest, controllerGeneration: number): Promise<EndpointDiscoveryResult> {
+    const query = new URLSearchParams();
+    if (controllerGeneration !== undefined) query.set("controllerGeneration", String(controllerGeneration));
+    const route = "/api/v1/opcua/discover" + (query.toString() ? "?" + query.toString() : "");
+    return send<EndpointDiscoveryResult>("POST", route, JSON.stringify(request));
+  },
+
+  connectOpcUa(request: EndpointDiscoveryRequest, controllerGeneration: number): Promise<Snapshot> {
+    const query = new URLSearchParams();
+    if (controllerGeneration !== undefined) query.set("controllerGeneration", String(controllerGeneration));
+    const route = "/api/v1/opcua/connect" + (query.toString() ? "?" + query.toString() : "");
+    return send<Snapshot>("POST", route, JSON.stringify(request));
+  },
+
+  disconnectOpcUa(controllerGeneration: number): Promise<Snapshot> {
+    const query = new URLSearchParams();
+    if (controllerGeneration !== undefined) query.set("controllerGeneration", String(controllerGeneration));
+    const route = "/api/v1/opcua/disconnect" + (query.toString() ? "?" + query.toString() : "");
+    return send<Snapshot>("POST", route);
+  },
+
+  browseAddressSpace(request: BrowseRequest, controllerGeneration: number): Promise<BrowseResult> {
+    const query = new URLSearchParams();
+    if (controllerGeneration !== undefined) query.set("controllerGeneration", String(controllerGeneration));
+    const route = "/api/v1/address-space/browse" + (query.toString() ? "?" + query.toString() : "");
+    return send<BrowseResult>("POST", route, JSON.stringify(request));
+  },
+
+  searchAddressSpace(request: SearchRequest, controllerGeneration: number): Promise<SearchResult> {
+    const query = new URLSearchParams();
+    if (controllerGeneration !== undefined) query.set("controllerGeneration", String(controllerGeneration));
+    const route = "/api/v1/address-space/search" + (query.toString() ? "?" + query.toString() : "");
+    return send<SearchResult>("POST", route, JSON.stringify(request));
   },
 
   getDiagnosticReport(): Promise<DiagnosticReport> {

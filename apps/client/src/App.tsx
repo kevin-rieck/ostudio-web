@@ -1,19 +1,37 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { ApiClientError, createApiClient, type Snapshot } from "@ostudio/contracts";
+import {
+  ApiClientError,
+  createApiClient,
+  type BrowseResult,
+  type DiagnosticReport,
+  type EndpointDiscoveryResult,
+  type SearchResult,
+  type Snapshot,
+} from "@ostudio/contracts";
 
 const api = createApiClient();
+
+function failureMessage(error: unknown, fallback: string): string {
+  return error instanceof ApiClientError ? error.message : fallback;
+}
 
 export function App() {
   const [authenticated, setAuthenticated] = useState(false);
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
-  const [message, setMessage] = useState<string | undefined>();
+  const [message, setMessage] = useState<string>();
   const [insecureDevelopment, setInsecureDevelopment] = useState(false);
   const [controllerRole, setControllerRole] = useState<"controller" | "observer">("observer");
   const [snapshot, setSnapshot] = useState<Snapshot>();
-  const controllerControls = useRef<{ setGeneration(generation: number): void; startRenewal(): void } | undefined>(
-    undefined,
-  );
+  const [endpointUrl, setEndpointUrl] = useState("");
+  const [discovery, setDiscovery] = useState<EndpointDiscoveryResult>();
+  const [diagnostics, setDiagnostics] = useState<DiagnosticReport>([]);
+  const [browseNodeId, setBrowseNodeId] = useState("i=84");
+  const [browseResult, setBrowseResult] = useState<BrowseResult>();
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResult, setSearchResult] = useState<SearchResult>();
+  const [working, setWorking] = useState(false);
+  const controllerControls = useRef<{ setGeneration(generation: number): void; startRenewal(): void } | undefined>(undefined);
 
   useEffect(() => {
     void api
@@ -37,30 +55,11 @@ export function App() {
     let renewTimer: number | undefined;
     let retryTimer: number | undefined;
     let controllerGeneration: number | undefined;
-    let startRenewal = (): void => undefined;
     const stopRenewal = (): void => {
       if (renewTimer !== undefined) window.clearInterval(renewTimer);
       renewTimer = undefined;
     };
-    const retry = (connectEvents: () => Promise<void>): void => {
-      if (!stopped && retryTimer === undefined)
-        retryTimer = window.setTimeout(() => {
-          retryTimer = undefined;
-          void connectEvents();
-        }, 1_000);
-    };
-    const refreshSnapshot = async (): Promise<Snapshot> => {
-      const current = await api.getSnapshot();
-      if (!stopped) {
-        setSnapshot(current);
-        setControllerRole(current.controller.role);
-        controllerGeneration = current.controller.controllerGeneration;
-        if (current.controller.role === "observer") stopRenewal();
-        else startRenewal();
-      }
-      return current;
-    };
-    startRenewal = (): void => {
+    const startRenewal = (): void => {
       stopRenewal();
       if (controllerGeneration === undefined) return;
       renewTimer = window.setInterval(() => {
@@ -70,11 +69,24 @@ export function App() {
         });
       }, 5_000);
     };
-    controllerControls.current = {
-      setGeneration: (generation) => {
-        controllerGeneration = generation;
-      },
-      startRenewal,
+    const refreshSnapshot = async (): Promise<Snapshot> => {
+      const [current, report] = await Promise.all([api.getSnapshot(), api.getDiagnosticReport()]);
+      if (!stopped) {
+        setDiagnostics(report);
+        setSnapshot(current);
+        setControllerRole(current.controller.role);
+        controllerGeneration = current.controller.controllerGeneration;
+        if (current.controller.role === "controller") startRenewal();
+        else stopRenewal();
+      }
+      return current;
+    };
+    const retry = (): void => {
+      if (!stopped && retryTimer === undefined)
+        retryTimer = window.setTimeout(() => {
+          retryTimer = undefined;
+          void connectEvents();
+        }, 1_000);
     };
     const connectEvents = async (): Promise<void> => {
       if (stopped || connecting) return;
@@ -85,27 +97,19 @@ export function App() {
         source?.close();
         const eventSource = new EventSource(`/api/v1/events?afterSequence=${current.sequence}`);
         source = eventSource;
-        eventSource.onmessage = (message) => {
-          try {
-            JSON.parse(message.data) as { type?: string };
-            void refreshSnapshot();
-          } catch {
-            eventSource.close();
-            if (source === eventSource) source = undefined;
-            retry(connectEvents);
-          }
-        };
+        eventSource.onmessage = () => void refreshSnapshot().catch(retry);
         eventSource.onerror = () => {
           eventSource.close();
           if (source === eventSource) source = undefined;
-          retry(connectEvents);
+          retry();
         };
       } catch {
-        retry(connectEvents);
+        retry();
       } finally {
         connecting = false;
       }
     };
+    controllerControls.current = { setGeneration: (generation) => { controllerGeneration = generation; }, startRenewal };
     void api
       .attachController()
       .then((controller) => {
@@ -138,52 +142,100 @@ export function App() {
       setInsecureDevelopment(session.insecureDevelopment);
       setPassword("");
     } catch (error) {
-      setMessage(error instanceof ApiClientError ? error.message : "Sign-in failed.");
+      setMessage(failureMessage(error, "Sign-in failed."));
     }
+  }
+
+  async function withWorking(action: () => Promise<void>, fallback: string): Promise<void> {
+    setMessage(undefined);
+    setWorking(true);
+    try {
+      await action();
+    } catch (error) {
+      setMessage(failureMessage(error, fallback));
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function discoverEndpoints(): Promise<void> {
+    await withWorking(async () => {
+      const result = await api.discoverOpcUaEndpoints({ endpointUrl }, snapshot!.controller.controllerGeneration);
+      setDiscovery(result);
+    }, "Endpoint discovery failed.");
+  }
+
+  async function connect(): Promise<void> {
+    const selected = discovery?.endpoints.find(
+      (endpoint) => endpoint.endpointUrl === endpointUrl && endpoint.securityMode === "None",
+    );
+    if (!selected) {
+      setMessage("Select a discovered SecurityPolicy None endpoint first.");
+      return;
+    }
+    await withWorking(async () => {
+      const current = await api.connectOpcUa({ endpointUrl: selected.endpointUrl }, snapshot!.controller.controllerGeneration);
+      setSnapshot(current);
+      setControllerRole(current.controller.role);
+    }, "The OPC UA Server connection failed.");
+  }
+
+  async function disconnect(): Promise<void> {
+    await withWorking(async () => {
+      const current = await api.disconnectOpcUa(snapshot!.controller.controllerGeneration);
+      setSnapshot(current);
+      setDiscovery(undefined);
+      setBrowseResult(undefined);
+      setSearchResult(undefined);
+    }, "The OPC UA Server could not be disconnected.");
+  }
+
+  async function browse(): Promise<void> {
+    await withWorking(
+      async () => setBrowseResult(await api.browseAddressSpace({ nodeId: browseNodeId }, snapshot!.controller.controllerGeneration)),
+      "Address Space browsing failed.",
+    );
+  }
+
+  async function search(): Promise<void> {
+    await withWorking(
+      async () => setSearchResult(await api.searchAddressSpace({ query: searchQuery }, snapshot!.controller.controllerGeneration)),
+      "Address Space Search failed.",
+    );
   }
 
   async function recoverControl(): Promise<void> {
-    setMessage(undefined);
-    try {
+    await withWorking(async () => {
       const controller = await api.recoverController();
-      controllerControls.current?.setGeneration(controller.controllerGeneration);
       setControllerRole(controller.role);
+      controllerControls.current?.setGeneration(controller.controllerGeneration);
       setSnapshot((current) => current && { ...current, controller });
-      if (controller.role === "controller") controllerControls.current?.startRenewal();
-    } catch (error) {
-      setMessage(error instanceof ApiClientError ? error.message : "Control recovery failed.");
-    }
+      controllerControls.current?.startRenewal();
+    }, "Control recovery failed.");
   }
 
   async function takeOver(): Promise<void> {
-    setMessage(undefined);
-    try {
+    await withWorking(async () => {
       const controller = await api.takeOverController();
-      controllerControls.current?.setGeneration(controller.controllerGeneration);
       setControllerRole(controller.role);
+      controllerControls.current?.setGeneration(controller.controllerGeneration);
       setSnapshot((current) => current && { ...current, controller });
-      if (controller.role === "controller") controllerControls.current?.startRenewal();
-    } catch (error) {
-      setMessage(error instanceof ApiClientError ? error.message : "Control transfer failed.");
-    }
+      controllerControls.current?.startRenewal();
+    }, "Control transfer failed.");
   }
 
   async function logout(): Promise<void> {
-    setMessage(undefined);
-    try {
+    await withWorking(async () => {
       await api.logoutAdmin();
       setAuthenticated(false);
       setPassword("");
-    } catch (error) {
-      setMessage(error instanceof ApiClientError ? error.message : "Sign-out failed.");
-    }
+    }, "Sign-out failed.");
   }
 
   return (
     <main className="shell">
       <p className="eyebrow">OPC UA Studio</p>
       <h1>Web workspace ready</h1>
-      <p>React is running in the browser.</p>
       {insecureDevelopment && (
         <p className="warning" role="status">
           Insecure development mode is enabled. Do not expose this server publicly.
@@ -192,22 +244,116 @@ export function App() {
       {authenticated ? (
         <>
           <h2>Troubleshooting Session</h2>
-          <p>Authentication succeeded. This browser is ready for OPC UA Studio.</p>
           <p role="status">
             {snapshot?.connection.state ?? "disconnected"} ·{" "}
-            {controllerRole === "controller" ? "Controller" : "Observer"}
+            {controllerRole === "controller" ? "Controller" : "Observer"} · Read-Only Mode
           </p>
           {controllerRole === "observer" &&
             (snapshot?.controller.recoverable ? (
-              <button type="button" onClick={() => void recoverControl()}>
+              <button type="button" onClick={() => void recoverControl()} disabled={working}>
                 Recover control
               </button>
             ) : (
-              <button type="button" onClick={() => void takeOver()}>
+              <button type="button" onClick={() => void takeOver()} disabled={working}>
                 Take over control
               </button>
             ))}
-          <button type="button" onClick={() => void logout()}>
+          {snapshot?.connection.state === "connected" && snapshot.connection.identityStatus === "unverified" && (
+            <p className="warning" role="alert">SecurityPolicy None: OPC UA Server identity is unverified.</p>
+          )}
+          {controllerRole === "controller" && (
+            <section aria-labelledby="connection-heading">
+              <h3 id="connection-heading">OPC UA Server connection</h3>
+              <label>
+                Endpoint URL
+                <input
+                  value={endpointUrl}
+                  onChange={(event) => setEndpointUrl(event.target.value)}
+                  placeholder="opc.tcp://localhost:4840"
+                />
+              </label>
+              <div className="actions">
+                <button type="button" onClick={() => void discoverEndpoints()} disabled={working || !endpointUrl}>
+                  Discover endpoints
+                </button>
+                <button type="button" onClick={() => void connect()} disabled={working || !discovery}>
+                  Connect anonymously
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void disconnect()}
+                  disabled={working || snapshot?.connection.state !== "connected"}
+                >
+                  Disconnect
+                </button>
+              </div>
+              {discovery && (
+                <ul>
+                  {discovery.endpoints.map((endpoint) => (
+                    <li key={`${endpoint.endpointUrl}-${endpoint.securityMode}-${endpoint.securityPolicyUri}`}>
+                      <button type="button" onClick={() => setEndpointUrl(endpoint.endpointUrl)}>
+                        {endpoint.securityMode} · {endpoint.securityPolicyUri}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          )}
+          {controllerRole === "observer" && snapshot?.nodes.length ? (
+            <section aria-label="Address Space">
+              <ul>{snapshot.nodes.map((node) => <li key={node.nodeId}>{node.displayName}</li>)}</ul>
+            </section>
+          ) : null}
+          {controllerRole === "controller" && snapshot?.connection.state === "connected" && (
+            <section aria-labelledby="address-space-heading">
+              <h3 id="address-space-heading">Address Space</h3>
+              <div className="actions">
+                <input
+                  value={browseNodeId}
+                  onChange={(event) => setBrowseNodeId(event.target.value)}
+                  aria-label="Node identifier"
+                />
+                <button type="button" onClick={() => void browse()} disabled={working}>
+                  Browse
+                </button>
+              </div>
+              {browseResult && (
+                <ul>
+                  {browseResult.references.map((reference) => (
+                    <li key={reference.nodeId}>
+                      <button type="button" onClick={() => setBrowseNodeId(reference.nodeId)}>
+                        {reference.displayName.text ?? reference.browseName.name ?? reference.nodeId}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="actions">
+                <input
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  aria-label="Address Space Search"
+                />
+                <button type="button" onClick={() => void search()} disabled={working}>
+                  Search
+                </button>
+              </div>
+              {searchResult && (
+                <p role="status">
+                  {searchResult.results.length} result(s); coverage {searchResult.coverage}.
+                </p>
+              )}
+            </section>
+          )}
+          {diagnostics.length > 0 && (
+            <section aria-label="Diagnostics">
+              <ul>{diagnostics.map((record, index) => (
+                <li key={index}>{"code" in record ? record.code : record.outcome} · {record.endpoint ?? "OPC UA Server"}</li>
+              ))}</ul>
+            </section>
+          )}
+          <button type="button" onClick={() => void logout()} disabled={working}>
             Sign out
           </button>
         </>

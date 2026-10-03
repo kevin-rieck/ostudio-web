@@ -68,7 +68,13 @@ describe("application facade", () => {
     await application.connect({ endpointUrl: "opc.tcp://plc:4840" });
 
     expect(application.snapshot()).toMatchObject({
-      connection: { state: "connected", endpointUrl: "opc.tcp://plc:4840" },
+      connection: {
+        state: "connected",
+        endpointUrl: "opc.tcp://plc:4840",
+        securityMode: "None",
+        securityPolicy: "None",
+        identityStatus: "unverified",
+      },
       safety: { readOnly: true, safetyGeneration: 2 },
     });
     expect(events.map((event) => event.type)).toEqual([
@@ -126,6 +132,7 @@ describe("application facade", () => {
 
   it("assigns a relative distance to explicitly browsed Address Space results", async () => {
     let browseCalls = 0;
+    let now = Date.parse("2026-01-01T00:00:01.000Z");
     const opcua = client();
     opcua.connect = async () => ({
       ...(await client().connect({ endpointUrl: "opc.tcp://plc:4840" })),
@@ -154,15 +161,20 @@ describe("application facade", () => {
     const application = createApplication({
       clientFactory: () => opcua,
       savedConnections: store,
-      clock: { now: () => new Date("2026-01-01T00:00:01.000Z") },
-      config: { shallowBrowseRequestBudget: 1 },
+      clock: { now: () => new Date(now) },
+      config: { shallowBrowseRequestBudget: 2 },
       events: { publish: () => undefined },
     });
     await application.connect({ endpointUrl: "opc.tcp://plc:4840" });
     await application.search("missing");
+    now += 1_000;
     await application.browse({ nodeId: "i=85" });
     const result = await application.search("pressure");
     expect(result.results).toMatchObject([{ nodeId: "ns=2;s=explicit", explicitBrowse: true, distance: 1 }]);
+    expect(result.requests).toBe(2);
+    now += 1_000;
+    await expect(application.browse({ nodeId: "i=85" })).rejects.toMatchObject({ code: "browse_budget_exhausted" });
+    expect(browseCalls).toBe(2);
   });
 
   it("orders display exact matches separately and uses safe connection references", async () => {
@@ -640,7 +652,7 @@ describe("application facade", () => {
       safety: { readOnly: true },
     });
     releaseBrowse();
-    await pendingBrowse;
+    await expect(pendingBrowse).rejects.toMatchObject({ code: "connection_required" });
   });
 
   it("restores Read-Only Mode before connection-loss cleanup finishes", async () => {
