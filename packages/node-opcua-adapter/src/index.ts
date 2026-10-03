@@ -57,6 +57,7 @@ import type {
 } from "@ostudio/application";
 import {
   boundedString,
+  safeAdvertisedUrl,
   projectDataValue,
   projectLocalizedText,
   projectReference,
@@ -158,10 +159,10 @@ function securityPolicy(value: string | undefined): SecurityPolicy {
   return (value ?? SecurityPolicy.None) as SecurityPolicy;
 }
 
-function endpointProjection(endpoint: EndpointDescription): OpcUaEndpoint {
+function endpointProjection(endpoint: EndpointDescription, endpointUrl: string): OpcUaEndpoint {
   const mode = MessageSecurityMode[endpoint.securityMode] as OpcUaEndpoint["securityMode"];
   return {
-    endpointUrl: boundedString(endpoint.endpointUrl ?? ""),
+    endpointUrl,
     securityMode: mode,
     securityPolicyUri: boundedString(endpoint.securityPolicyUri ?? ""),
     serverCertificateFingerprint: mode === "None" ? undefined : fingerprint(endpoint.serverCertificate),
@@ -788,16 +789,22 @@ class NodeOpcuaAdapter implements OpcUaClient {
   async discover(request: OpcUaDiscoveryRequest): Promise<OpcUaDiscoveryResult> {
     const result = await this.discoverRaw(request.endpointUrl);
     return {
-      servers: result.servers.map((server) => ({
+      servers: result.servers.slice(0, 32).map((server) => ({
         applicationUri: boundedString(server.applicationUri ?? ""),
         productUri: boundedString(server.productUri ?? ""),
         applicationName: server.applicationName ? projectLocalizedText(server.applicationName) : undefined,
         discoveryUrls: (server.discoveryUrls ?? [])
-          .filter((url): url is string => typeof url === "string")
+          .filter(
+            (url): url is string =>
+              typeof url === "string" && safeAdvertisedUrl(url, request.endpointUrl) !== undefined,
+          )
           .slice(0, 32)
-          .map(boundedString),
+          .map(() => request.endpointUrl),
       })),
-      endpoints: result.endpoints.map(endpointProjection),
+      endpoints: result.endpoints
+        .filter((endpoint) => safeAdvertisedUrl(endpoint.endpointUrl ?? "", request.endpointUrl) !== undefined)
+        .slice(0, 256)
+        .map((endpoint) => endpointProjection(endpoint, request.endpointUrl)),
     };
   }
 
@@ -810,13 +817,13 @@ class NodeOpcuaAdapter implements OpcUaClient {
     const policy = request.securityPolicyUri ?? SecurityPolicy.None;
     const selectedRaw = discovered.endpoints.find(
       (endpoint) =>
-        endpoint.endpointUrl === request.endpointUrl &&
+        safeAdvertisedUrl(endpoint.endpointUrl ?? "", request.endpointUrl) !== undefined &&
         endpoint.securityMode === securityMode(mode) &&
         endpoint.securityPolicyUri === policy,
     );
     if (!selectedRaw)
       throw new NodeOpcuaAdapterError("endpoint_not_found", "The requested OPC UA endpoint was not advertised.");
-    const selected = endpointProjection(selectedRaw);
+    const selected = endpointProjection(selectedRaw, request.endpointUrl);
     if (mode !== "None" && !selectedRaw.serverCertificate) {
       throw new NodeOpcuaAdapterError(
         "server_certificate_required",
@@ -842,7 +849,7 @@ class NodeOpcuaAdapter implements OpcUaClient {
     const rawClient = this.createRawClient({
       securityMode: securityMode(mode),
       securityPolicy: securityPolicy(policy),
-      endpointMustExist: true,
+      endpointMustExist: selectedRaw.endpointUrl === request.endpointUrl,
       ...(selectedRaw?.serverCertificate ? { serverCertificate: selectedRaw.serverCertificate } : {}),
     });
     let lossNotified = false;
@@ -860,7 +867,7 @@ class NodeOpcuaAdapter implements OpcUaClient {
           notifyLoss({ code: "session_closed", message: "The OPC UA connection was closed." });
         }
       });
-      await withDeadline(rawClient.connect(selected.endpointUrl), this.connectTimeout);
+      await withDeadline(rawClient.connect(request.endpointUrl), this.connectTimeout);
       const rawSession = await withDeadline(
         rawClient.createSession(
           request.userIdentity ? this.userIdentity(request.userIdentity) : { type: UserTokenType.Anonymous },

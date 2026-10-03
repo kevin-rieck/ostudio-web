@@ -148,6 +148,206 @@ describe("server routes", () => {
     expect(crossOrigin.json()).toMatchObject({ code: "origin_rejected" });
   });
 
+  it("discovers and connects only for the controller, and disconnects in Read-Only Mode", async () => {
+    const calls: string[] = [];
+    const runtimeSnapshot = (): import("@ostudio/contracts").Snapshot => ({
+      sequence: 0,
+      buildVersion: "test",
+      generatedAt: new Date(0).toISOString(),
+      controller: { role: "controller", controllerGeneration: 1 },
+      safety: { readOnly: true, safetyGeneration: 2 },
+      connection: {
+        state: "connected",
+        endpoint: "opc.tcp://plc:4840",
+        securityMode: "None",
+        securityPolicy: "None",
+        identityStatus: "unverified",
+      },
+      nodes: [],
+    });
+    server = await createServer({
+      env: developmentEnvironment,
+      runtime: {
+        snapshot: runtimeSnapshot,
+        discover: async () => ({
+          servers: [],
+          endpoints: [
+            {
+              endpointUrl: "opc.tcp://plc:4840",
+              securityMode: "None",
+              securityPolicyUri: "http://opcfoundation.org/UA/SecurityPolicy#None",
+            },
+          ],
+        }),
+        connect: async () => {
+          calls.push("connect");
+        },
+        browse: async ({ nodeId }) => ({
+          nodeId,
+          references: [],
+          status: { name: "Good", value: 0 },
+          requests: 1,
+          truncated: false,
+        }),
+        search: async () => ({ results: [], coverage: "complete", requests: 0, budget: 250 }),
+        setReadOnly: () => {
+          calls.push("read-only");
+        },
+        disconnect: async () => {
+          calls.push("disconnect");
+        },
+      },
+    });
+    const login = async (): Promise<string> =>
+      String(
+        (
+          await server!.inject({
+            method: "POST",
+            url: "/api/v1/auth/login",
+            headers: { origin: "http://localhost:8080" },
+            payload: { username: "admin", password: "correct horse battery staple" },
+          })
+        ).headers["set-cookie"],
+      );
+    const controller = await login();
+    const observer = await login();
+    await server.inject({
+      method: "POST",
+      url: "/api/v1/controller/attach",
+      headers: { origin: "http://localhost:8080", cookie: controller },
+    });
+    expect(
+      (
+        await server.inject({
+          method: "POST",
+          url: "/api/v1/opcua/discover?controllerGeneration=1",
+          headers: { origin: "http://localhost:8080", cookie: observer },
+          payload: { endpointUrl: "opc.tcp://plc:4840" },
+        })
+      ).statusCode,
+    ).toBe(409);
+    const discovered = await server.inject({
+      method: "POST",
+      url: "/api/v1/opcua/discover?controllerGeneration=1",
+      headers: { origin: "http://localhost:8080", cookie: controller },
+      payload: { endpointUrl: "opc.tcp://plc:4840" },
+    });
+    expect(discovered.statusCode).toBe(200);
+    server.recordConnectionDiagnostic({
+      code: "connection_failed",
+      endpoint: "opc.tcp://admin:secret@plc:4840/private",
+      outcome: "unknown",
+    });
+    const diagnostics = (
+      await server.inject({ method: "GET", url: "/api/v1/diagnostics", headers: { cookie: observer } })
+    ).json();
+    expect(diagnostics).toMatchObject([
+      {
+        code: "connection_failed",
+        actor: "admin",
+        endpoint: "opc.tcp://plc:4840",
+        controllerGeneration: 1,
+        outcome: "unknown",
+      },
+    ]);
+    expect(diagnostics[0].operationId).toMatch(/^op-[A-Za-z0-9]{20,64}$/);
+    expect(diagnostics[0].correlationId).toMatch(/^cor-[A-Za-z0-9]{20,64}$/);
+    expect(JSON.stringify(diagnostics)).not.toMatch(/secret|private/);
+    expect(
+      (
+        await server.inject({
+          method: "POST",
+          url: "/api/v1/opcua/connect?controllerGeneration=0",
+          headers: { origin: "http://localhost:8080", cookie: controller },
+          payload: { endpointUrl: "opc.tcp://plc:4840" },
+        })
+      ).statusCode,
+    ).toBe(409);
+    expect(
+      (
+        await server.inject({
+          method: "POST",
+          url: "/api/v1/opcua/connect?controllerGeneration=1",
+          headers: { origin: "http://localhost:8080", cookie: controller },
+          payload: { endpointUrl: "opc.tcp://plc:4840" },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await server.inject({
+          method: "POST",
+          url: "/api/v1/opcua/disconnect?controllerGeneration=1",
+          headers: { origin: "http://localhost:8080", cookie: controller },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(calls).toEqual(["connect", "read-only", "disconnect"]);
+  });
+
+  it("revokes an in-flight connection before takeover and fences its response", async () => {
+    let beginConnect!: () => void;
+    let finishConnect!: () => void;
+    const started = new Promise<void>((resolve) => {
+      beginConnect = resolve;
+    });
+    const pending = new Promise<void>((resolve) => {
+      finishConnect = resolve;
+    });
+    let disconnected = 0;
+    server = await createServer({
+      env: developmentEnvironment,
+      runtime: {
+        connect: async () => {
+          beginConnect();
+          await pending;
+        },
+        setReadOnly: () => undefined,
+        disconnect: async () => {
+          disconnected += 1;
+        },
+      },
+    });
+    const login = async () =>
+      String(
+        (
+          await server!.inject({
+            method: "POST",
+            url: "/api/v1/auth/login",
+            headers: { origin: "http://localhost:8080" },
+            payload: { username: "admin", password: "correct horse battery staple" },
+          })
+        ).headers["set-cookie"],
+      );
+    const first = await login();
+    const second = await login();
+    const post = (url: string, cookie: string, payload?: object) =>
+      server!.inject({
+        method: "POST",
+        url,
+        headers: { origin: "http://localhost:8080", cookie },
+        payload,
+      });
+    await post("/api/v1/controller/attach", first);
+    const connection = post("/api/v1/opcua/connect?controllerGeneration=1", first, {
+      endpointUrl: "opc.tcp://plc:4840",
+    });
+    await started;
+    const takeover = post("/api/v1/controller/takeover", second);
+    // Takeover revokes control before waiting for the old OPC UA request to finish.
+    await expect
+      .poll(
+        async () =>
+          (await server!.inject({ method: "GET", url: "/api/v1/snapshot", headers: { cookie: first } })).json()
+            .controller.role,
+      )
+      .toBe("observer");
+    finishConnect();
+    expect((await connection).statusCode).toBe(409);
+    expect((await takeover).json()).toMatchObject({ role: "controller" });
+    expect(disconnected).toBe(1);
+  });
+
   it("reports liveness without exposing application state", async () => {
     server = await createServer({ env: developmentEnvironment });
 

@@ -4,7 +4,17 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import { loginRequestSchema, type EventEnvelope, type Snapshot } from "@ostudio/contracts";
+import {
+  loginRequestSchema,
+  type BrowseRequest,
+  type BrowseResult,
+  type ConnectionDiagnostic,
+  type EndpointDiscoveryRequest,
+  type EndpointDiscoveryResult,
+  type EventEnvelope,
+  type SearchResult,
+  type Snapshot,
+} from "@ostudio/contracts";
 import { createAuthenticator, authConstants, type AuthSession } from "./auth.js";
 
 const SESSION_COOKIE = "ostudio_session";
@@ -21,6 +31,10 @@ export interface TimerScheduler {
 
 export interface RuntimeShutdownHooks {
   snapshot?(): Snapshot;
+  discover?(request: EndpointDiscoveryRequest): Promise<EndpointDiscoveryResult>;
+  connect?(request: EndpointDiscoveryRequest): Promise<void>;
+  browse?(request: BrowseRequest): Promise<BrowseResult>;
+  search?(request: { query: string }): Promise<SearchResult>;
   setReadOnly?(readOnly: true): Promise<void> | void;
   disconnect?(): Promise<void>;
   close?(): Promise<void>;
@@ -40,6 +54,7 @@ export interface ServerOptions {
 export interface WebServer extends FastifyInstance {
   eventSequence(): number;
   publishEvent(type: EventType, payload: EventEnvelope["payload"]): EventEnvelope;
+  recordConnectionDiagnostic(record: Pick<ConnectionDiagnostic, "code" | "outcome"> & { endpoint?: string }): void;
   shutdown(): Promise<void>;
 }
 
@@ -246,6 +261,30 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   let controllerOwner: string | undefined;
   let recoverableControllerSessionId: string | undefined;
   let controllerGeneration = 0;
+  const diagnostics: ConnectionDiagnostic[] = [];
+  const recordConnectionDiagnostic = (
+    record: Pick<ConnectionDiagnostic, "code" | "outcome"> & { endpoint?: string },
+  ): void => {
+    let endpoint = "OPC UA Server";
+    try {
+      if (record.endpoint) {
+        const url = new URL(record.endpoint);
+        if (url.protocol === "opc.tcp:") endpoint = `${url.protocol}//${url.host}`.slice(0, 256);
+      }
+    } catch {
+      /* No untrusted endpoint text reaches diagnostics. */
+    }
+    diagnostics.push({
+      code: record.code,
+      actor: "admin",
+      endpoint,
+      controllerGeneration,
+      operationId: `op-${randomBytes(16).toString("hex")}`,
+      correlationId: `cor-${randomBytes(16).toString("hex")}`,
+      outcome: record.outcome,
+    });
+    if (diagnostics.length > 100) diagnostics.shift();
+  };
   let controllerLeaseExpiresAt: number | undefined;
   let controllerExpiryTimer: unknown;
   let disconnectGraceTimer: unknown;
@@ -386,7 +425,10 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     scheduleControllerExpiry();
     publishEvent("ownership-changed", { role: "controller", controllerGeneration });
   };
-  const revokeController = (): Promise<void> => serializeControl(revokeControllerState);
+  const revokeController = (): Promise<void> =>
+    commandInFlight && controllerOwner !== undefined
+      ? revokeControllerState()
+      : serializeControl(revokeControllerState);
   const revokeExpiredController = async (): Promise<void> => {
     try {
       await revokeController();
@@ -394,14 +436,17 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       server.log.error("Unable to restore Read-Only Mode after authentication expiry.");
     }
   };
-  const expireController = (): Promise<void> =>
-    serializeControl(async () => {
+  const expireController = async (): Promise<void> => {
+    if (commandInFlight && controllerLeaseExpiresAt !== undefined && now() >= controllerLeaseExpiresAt)
+      await revokeControllerState();
+    return serializeControl(async () => {
       if (controllerLeaseExpiresAt === undefined || now() < controllerLeaseExpiresAt) {
         scheduleControllerExpiry();
         return;
       }
       await revokeControllerState();
     });
+  };
   const onControllerExpired = (): void => {
     void expireController().catch(() => server.log.error("Unable to restore Read-Only Mode after controller expiry."));
   };
@@ -414,6 +459,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
 
   server.decorate("eventSequence", eventSequence);
   server.decorate("publishEvent", publishEvent);
+  server.decorate("recordConnectionDiagnostic", recordConnectionDiagnostic);
   server.decorate("shutdown", async (): Promise<void> => {
     if (shutdownPromise) return shutdownPromise;
     shutdownPromise = (async () => {
@@ -456,7 +502,9 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     const protectedApi =
       pathname === "/api/v1/auth/logout" ||
       ["/api/v1/build", "/api/v1/snapshot", "/api/v1/events", "/api/v1/diagnostics"].includes(pathname) ||
-      pathname.startsWith("/api/v1/controller/");
+      pathname.startsWith("/api/v1/controller/") ||
+      pathname.startsWith("/api/v1/opcua/") ||
+      pathname.startsWith("/api/v1/address-space/");
     if (isLogin && !sameOrigin(request, config)) {
       void reply.code(403).send(errorBody("origin_rejected", "The request origin is not allowed."));
       return;
@@ -536,7 +584,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     return { authenticated: Boolean(session), insecureDevelopment: config.insecureDevelopment };
   });
   server.get("/api/v1/build", async () => ({ buildVersion }));
-  server.get("/api/v1/snapshot", async (request) => {
+  const currentSnapshot = (request: FastifyRequest): Snapshot => {
     const session = (request as RequestWithSession).authSession!;
     const snapshotSequence = sequence;
     const runtimeSnapshot = options.runtime?.snapshot?.();
@@ -557,7 +605,8 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
         recoverableControllerSessionId,
       ),
     } satisfies Snapshot;
-  });
+  };
+  server.get("/api/v1/snapshot", async (request) => currentSnapshot(request));
   server.post("/api/v1/controller/attach", async (request, reply) => {
     const session = (request as RequestWithSession).authSession!;
     await serializeControl(async () => {
@@ -606,6 +655,8 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   });
   server.post("/api/v1/controller/takeover", async (request, reply) => {
     const session = (request as RequestWithSession).authSession!;
+    // Revoke immediately even when an old controller's OPC UA request is still in flight.
+    if (commandInFlight && controllerOwner !== undefined) await revokeControllerState();
     await serializeControl(async () => {
       const hadController = controllerOwner !== undefined;
       if (hadController) await revokeControllerState();
@@ -648,7 +699,146 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       return reply.code(204).send();
     });
   });
-  server.get("/api/v1/diagnostics", async () => []);
+  let commandInFlight = false;
+  const controllerCommand = async <T>(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    operation: () => Promise<T>,
+    connectionChange = false,
+  ): Promise<T | undefined> =>
+    serializeControl(async () => {
+      const session = (request as RequestWithSession).authSession!;
+      const generation = Number(new URL(request.url, config.publicOrigin).searchParams.get("controllerGeneration"));
+      if (controllerOwner === session.id && controllerLeaseExpiresAt !== undefined && now() >= controllerLeaseExpiresAt)
+        await revokeControllerState();
+      if (controllerOwner !== session.id || !Number.isSafeInteger(generation) || generation !== controllerGeneration) {
+        void reply
+          .code(409)
+          .send(errorBody("controller_generation_mismatch", "The controller lease is no longer current."));
+        return;
+      }
+      commandInFlight = true;
+      try {
+        const result = await operation();
+        if (
+          controllerOwner !== session.id ||
+          generation !== controllerGeneration ||
+          controllerLeaseExpiresAt === undefined ||
+          now() >= controllerLeaseExpiresAt
+        ) {
+          if (controllerOwner === session.id) await revokeControllerState();
+          if (connectionChange) await disconnectRuntime("Unable to disconnect the runtime after controller loss.");
+          void reply
+            .code(409)
+            .send(errorBody("controller_generation_mismatch", "The controller lease is no longer current."));
+          return;
+        }
+        return result;
+      } finally {
+        commandInFlight = false;
+      }
+    });
+  const requestBody = <T>(request: FastifyRequest): T | undefined => {
+    const body = request.body;
+    return body && typeof body === "object" ? (body as T) : undefined;
+  };
+  const endpointRequest = (request: FastifyRequest): EndpointDiscoveryRequest | undefined => {
+    const body = requestBody<EndpointDiscoveryRequest>(request);
+    if (
+      !body ||
+      typeof body.endpointUrl !== "string" ||
+      body.endpointUrl.length === 0 ||
+      body.endpointUrl.length > 2048
+    )
+      return undefined;
+    try {
+      const endpoint = new URL(body.endpointUrl);
+      if (endpoint.protocol !== "opc.tcp:" || endpoint.username || endpoint.password) return undefined;
+    } catch {
+      return undefined;
+    }
+    return { endpointUrl: body.endpointUrl };
+  };
+  const runtimeError = (
+    reply: FastifyReply,
+    code: "discovery_failed" | "connection_failed" | "operation_failed",
+  ): void => {
+    void reply.code(502).send(errorBody(code, "The OPC UA operation could not be completed."));
+  };
+  server.post("/api/v1/opcua/discover", async (request, reply) =>
+    controllerCommand(request, reply, async () => {
+      const body = endpointRequest(request);
+      if (!body) return void reply.code(400).send(errorBody("bad_request", "The endpoint URL is invalid."));
+      if (!options.runtime?.discover) return runtimeError(reply, "discovery_failed");
+      try {
+        return await options.runtime.discover(body);
+      } catch {
+        return runtimeError(reply, "discovery_failed");
+      }
+    }),
+  );
+  server.post("/api/v1/opcua/connect", async (request, reply) =>
+    controllerCommand(
+      request,
+      reply,
+      async () => {
+        const body = endpointRequest(request);
+        if (!body) return void reply.code(400).send(errorBody("bad_request", "The endpoint URL is invalid."));
+        if (!options.runtime?.connect) return runtimeError(reply, "connection_failed");
+        try {
+          await options.runtime.connect(body);
+          return currentSnapshot(request);
+        } catch {
+          return runtimeError(reply, "connection_failed");
+        }
+      },
+      true,
+    ),
+  );
+  server.post("/api/v1/opcua/disconnect", async (request, reply) =>
+    controllerCommand(request, reply, async () => {
+      if (!options.runtime?.disconnect) return runtimeError(reply, "operation_failed");
+      try {
+        await restoreReadOnly();
+        await options.runtime.disconnect();
+        publishEvent("connection-changed", { state: "disconnected" });
+        return currentSnapshot(request);
+      } catch {
+        return runtimeError(reply, "operation_failed");
+      }
+    }),
+  );
+  server.post("/api/v1/address-space/browse", async (request, reply) =>
+    controllerCommand(request, reply, async () => {
+      const body = requestBody<BrowseRequest>(request);
+      if (!body || typeof body.nodeId !== "string" || body.nodeId.length === 0 || body.nodeId.length > 512)
+        return void reply.code(400).send(errorBody("bad_request", "The Address Space node identifier is invalid."));
+      if (!options.runtime?.browse) return runtimeError(reply, "operation_failed");
+      try {
+        const result = await options.runtime.browse({ nodeId: body.nodeId });
+        publishEvent("snapshot-required", { reason: "reconnect" });
+        return result;
+      } catch {
+        return runtimeError(reply, "operation_failed");
+      }
+    }),
+  );
+  server.post("/api/v1/address-space/search", async (request, reply) =>
+    controllerCommand(request, reply, async () => {
+      const body = requestBody<{ query: string }>(request);
+      if (!body || typeof body.query !== "string" || body.query.length > 256)
+        return void reply.code(400).send(errorBody("bad_request", "The Address Space Search query is invalid."));
+      if (!options.runtime?.search) return runtimeError(reply, "operation_failed");
+      try {
+        const result = await options.runtime.search({ query: body.query });
+        publishEvent("snapshot-required", { reason: "reconnect" });
+        return result;
+      } catch {
+        return runtimeError(reply, "operation_failed");
+      }
+    }),
+  );
+  server.get("/api/v1/diagnostics", async () => diagnostics);
   server.get("/api/v1/events", async (request, reply) => {
     const rawAfter = new URL(request.url, config.publicOrigin).searchParams.get("afterSequence");
     const after = rawAfter === null ? 0 : Number(rawAfter);

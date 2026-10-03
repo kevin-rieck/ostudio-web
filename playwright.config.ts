@@ -8,9 +8,15 @@ export default defineConfig({
     baseURL: "http://127.0.0.1:8080",
     trace: "on-first-retry",
   },
+  workers: 1,
+  timeout: 90_000,
   webServer: {
     command: "npm run build && npm run start --workspace @ostudio/server",
-    env: { OSTUDIO_INSECURE_DEV: "true" },
+    env: {
+      OSTUDIO_INSECURE_DEV: "true",
+      OSTUDIO_ADMIN_PASSWORD: "correct horse battery staple",
+      OSTUDIO_PUBLIC_ORIGIN: "http://127.0.0.1:8080",
+    },
     url: "http://127.0.0.1:8080/health/live",
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

@@ -303,6 +303,9 @@ export interface ApplicationConfig {
 export interface ConnectionSnapshot {
   state: "disconnected" | "connecting" | "connected" | "connection-lost";
   endpointUrl?: string;
+  securityPolicy?: string;
+  securityMode?: "None" | "Sign" | "SignAndEncrypt";
+  identityStatus?: "unverified" | "verified" | "notApplicable";
   connectionGeneration: number;
   error?: string;
 }
@@ -375,6 +378,7 @@ export interface ApplicationSnapshot {
   inspections: Record<string, VariableNodeInspection>;
   trends: Record<string, TrendPoint[]>;
   search: SearchSnapshot;
+  browsed?: OpcUaBrowseResult;
   diagnostics: DiagnosticRecord[];
 }
 
@@ -723,6 +727,7 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
         inspections: {},
         trends: {},
         search: { results: [], coverage: "complete", requests: 0, budget: config.shallowBrowseRequestBudget },
+        browsed: undefined,
       }),
       "search-changed",
     );
@@ -794,13 +799,13 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
     queuedShallowBrowseNodes.delete(nodeId);
     visitedShallowBrowseNodes.add(nodeId);
     browseRequests += 1;
+    lastShallowBrowseAt = now;
     update(
       (current) => ({ ...current, search: { ...current.search, requests: browseRequests, coverage: "incomplete" } }),
       "search-changed",
     );
     const result = await currentSession.browse({ nodeId, maxRequests: 1 });
     if (session !== currentSession || state.connection.connectionGeneration !== generation) return;
-    lastShallowBrowseAt = dependencies.clock.now().getTime();
     for (const reference of result.references) {
       indexSearchCandidate(indexed, {
         nodeId: reference.nodeId,
@@ -851,7 +856,14 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
         update(
           (current) => ({
             ...current,
-            connection: { ...current.connection, state: "connecting", endpointUrl: safeEndpointUrl },
+            connection: {
+              ...current.connection,
+              state: "connecting",
+              endpointUrl: safeEndpointUrl,
+              securityPolicy: request.securityPolicyUri ?? "None",
+              securityMode: request.securityMode ?? "None",
+              identityStatus: (request.securityMode ?? "None") === "None" ? "unverified" : "verified",
+            },
           }),
           "connection-changed",
         );
@@ -865,7 +877,14 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
           update(
             (current) => ({
               ...current,
-              connection: { state: "connected", endpointUrl: safeEndpointUrl, connectionGeneration: generation },
+              connection: {
+                state: "connected",
+                endpointUrl: safeEndpointUrl,
+                securityPolicy: request.securityPolicyUri ?? "None",
+                securityMode: request.securityMode ?? "None",
+                identityStatus: (request.securityMode ?? "None") === "None" ? "unverified" : "verified",
+                connectionGeneration: generation,
+              },
             }),
             "connection-changed",
           );
@@ -900,9 +919,38 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
       serialized(async () => {
         const currentSession = requireSession();
         const generation = state.connection.connectionGeneration;
-        const result = await currentSession.browse(request);
-        if (session !== currentSession || state.connection.connectionGeneration !== generation) return result;
+        if (browseRequests >= config.shallowBrowseRequestBudget) {
+          update(
+            (current) => ({ ...current, search: { ...current.search, coverage: "incomplete" } }),
+            "search-changed",
+          );
+          return state.browsed?.nodeId === request.nodeId
+            ? { ...state.browsed, truncated: true }
+            : {
+                nodeId: request.nodeId,
+                references: [],
+                status: { name: "Good", value: 0 },
+                requests: 0,
+                truncated: true,
+              };
+        }
+        const now = dependencies.clock.now().getTime();
+        if (lastShallowBrowseAt !== undefined && now - lastShallowBrowseAt < config.shallowBrowseIntervalMilliseconds)
+          throw new ApplicationError("browse_budget_exhausted", "Rate-Limited Browsing is available again shortly.");
+        browseRequests += 1;
+        lastShallowBrowseAt = now;
+        const result = await currentSession.browse({ ...request, maxRequests: 1 });
+        if (session !== currentSession || state.connection.connectionGeneration !== generation)
+          throw new ApplicationError("connection_required", "The OPC UA connection changed during browsing.");
+        update(
+          (current) => ({
+            ...current,
+            search: { ...current.search, requests: browseRequests, coverage: "incomplete" },
+          }),
+          "search-changed",
+        );
         const distance = (shallowBrowseDistances.get(request.nodeId) ?? indexed.get(request.nodeId)?.distance ?? 0) + 1;
+        update((current) => ({ ...current, browsed: result }), "search-changed");
         for (const reference of result.references) {
           indexSearchCandidate(indexed, {
             nodeId: reference.nodeId,
@@ -960,10 +1008,12 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
         }
       }
       if (session !== searchSession || state.connection.connectionGeneration !== searchGeneration) return state.search;
+      const matches = rankSearch([...indexed.values()], query);
       const search = {
         ...state.search,
-        results: rankSearch([...indexed.values()], query),
+        results: matches.slice(0, 10_000),
         coverage:
+          matches.length > 10_000 ||
           incompleteCoverage ||
           state.search.coverage === "incomplete" ||
           (session !== undefined && shallowBrowseQueue.length > 0)

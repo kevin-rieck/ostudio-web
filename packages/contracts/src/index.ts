@@ -18,7 +18,91 @@ export interface ApiError {
   retryable?: boolean;
 }
 
-export type ErrorCode = "authentication_required" | "bad_request" | "internal_error" | "confirmation_required" | "controller_required" | "controller_generation_mismatch" | "challenge_expired" | "connection_required" | "mutation_not_allowed" | "operation_id_limit_reached" | "operation_result_unavailable" | "origin_rejected" | "request_too_large" | "safety_generation_mismatch" | "watchlist_limit_reached" | "browse_budget_exhausted";
+export type ErrorCode = "authentication_required" | "bad_request" | "internal_error" | "confirmation_required" | "controller_required" | "controller_generation_mismatch" | "challenge_expired" | "connection_required" | "mutation_not_allowed" | "operation_id_limit_reached" | "operation_result_unavailable" | "origin_rejected" | "request_too_large" | "safety_generation_mismatch" | "watchlist_limit_reached" | "browse_budget_exhausted" | "discovery_failed" | "connection_failed" | "operation_failed";
+
+export interface EndpointDiscoveryRequest {
+  endpointUrl: string;
+}
+
+export interface EndpointDiscoveryResult {
+  servers: ServerDescription[];
+  endpoints: DiscoveredEndpoint[];
+}
+
+export interface ServerDescription {
+  applicationUri: string;
+  productUri: string;
+  applicationName?: LocalizedText;
+  discoveryUrls: string[];
+}
+
+export interface LocalizedText {
+  locale?: string;
+  text?: string;
+}
+
+export interface DiscoveredEndpoint {
+  endpointUrl: string;
+  securityMode: "None" | "Sign" | "SignAndEncrypt";
+  securityPolicyUri: string;
+  serverCertificateFingerprint?: string;
+}
+
+export interface BrowseRequest {
+  nodeId: string;
+}
+
+export interface BrowseResult {
+  nodeId: string;
+  references: AddressSpaceReference[];
+  status: StatusCode;
+  requests: number;
+  truncated: boolean;
+}
+
+export interface AddressSpaceReference {
+  nodeId: string;
+  browseName: QualifiedName;
+  displayName: LocalizedText;
+  nodeClass: "Object" | "Variable" | "Method" | "View" | "DataType" | "ReferenceType" | "ObjectType" | "VariableType" | "Unspecified";
+  referenceTypeId?: string;
+  typeDefinition?: string;
+  isForward: boolean;
+}
+
+export interface QualifiedName {
+  namespaceIndex: number;
+  name?: string;
+}
+
+export interface StatusCode {
+  name: string;
+  value: number;
+  description?: string;
+}
+
+export interface SearchRequest {
+  query: string;
+}
+
+export interface SearchResult {
+  results: SearchMatch[];
+  coverage: "complete" | "incomplete";
+  requests: number;
+  budget: number;
+}
+
+export interface SearchMatch {
+  nodeId: string;
+  aliasNames?: string[];
+  browseName?: string;
+  displayName?: string;
+  explicitBrowse?: boolean;
+  distance?: number;
+  nodeClass?: "Object" | "Variable" | "Method" | "View" | "DataType" | "ReferenceType" | "ObjectType" | "VariableType" | "Unspecified";
+  score: number;
+  match: "alias-exact" | "browse-exact" | "display-exact" | "prefix" | "substring";
+}
 
 export interface BuildInfo {
   buildVersion: string;
@@ -37,6 +121,8 @@ export interface Snapshot {
   connection: ConnectionSummary;
   selectedNodeId?: string;
   nodes: AddressSpaceNode[];
+  browsed?: BrowseResult;
+  search?: SearchResult;
 }
 
 export interface ControllerState {
@@ -123,7 +209,17 @@ export interface LiveValueChangedPayload {
   liveValue: LiveValue;
 }
 
-export type DiagnosticReport = DiagnosticRecord[];
+export type DiagnosticReport = (DiagnosticRecord | ConnectionDiagnostic)[];
+
+export interface ConnectionDiagnostic {
+  code: "connection_failed" | "connection_lost";
+  actor: string;
+  endpoint: string;
+  controllerGeneration: number;
+  operationId: OperationId;
+  correlationId: CorrelationId;
+  outcome: "unknown";
+}
 
 export interface DiagnosticRecord {
   actor: string;
@@ -214,6 +310,11 @@ export interface ApiClient {
   getBuildInfo(): Promise<BuildInfo>;
   getSnapshot(): Promise<Snapshot>;
   attachEvents(afterSequence?: number): Promise<void>;
+  discoverOpcUaEndpoints(request: EndpointDiscoveryRequest, controllerGeneration: number): Promise<EndpointDiscoveryResult>;
+  connectOpcUa(request: EndpointDiscoveryRequest, controllerGeneration: number): Promise<Snapshot>;
+  disconnectOpcUa(controllerGeneration: number): Promise<Snapshot>;
+  browseAddressSpace(request: BrowseRequest, controllerGeneration: number): Promise<BrowseResult>;
+  searchAddressSpace(request: SearchRequest, controllerGeneration: number): Promise<SearchResult>;
   getDiagnosticReport(): Promise<DiagnosticReport>;
   attachController(): Promise<ControllerState>;
   recoverController(): Promise<ControllerState>;
@@ -280,6 +381,26 @@ export function createApiClient(transport: ContractTransport = defaultTransport,
     return send<void>("GET", route);
   },
 
+  discoverOpcUaEndpoints(request: EndpointDiscoveryRequest, controllerGeneration: number): Promise<EndpointDiscoveryResult> {
+    return send<EndpointDiscoveryResult>("POST", "/api/v1/opcua/discover" + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)), JSON.stringify(request));
+  },
+
+  connectOpcUa(request: EndpointDiscoveryRequest, controllerGeneration: number): Promise<Snapshot> {
+    return send<Snapshot>("POST", "/api/v1/opcua/connect" + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)), JSON.stringify(request));
+  },
+
+  disconnectOpcUa(controllerGeneration: number): Promise<Snapshot> {
+    return send<Snapshot>("POST", "/api/v1/opcua/disconnect" + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)));
+  },
+
+  browseAddressSpace(request: BrowseRequest, controllerGeneration: number): Promise<BrowseResult> {
+    return send<BrowseResult>("POST", "/api/v1/address-space/browse" + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)), JSON.stringify(request));
+  },
+
+  searchAddressSpace(request: SearchRequest, controllerGeneration: number): Promise<SearchResult> {
+    return send<SearchResult>("POST", "/api/v1/address-space/search" + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)), JSON.stringify(request));
+  },
+
   getDiagnosticReport(): Promise<DiagnosticReport> {
     return send<DiagnosticReport>("GET", "/api/v1/diagnostics");
   },
@@ -297,10 +418,7 @@ export function createApiClient(transport: ContractTransport = defaultTransport,
   },
 
   renewControllerLease(controllerGeneration: number): Promise<void> {
-    const query = new URLSearchParams();
-    if (controllerGeneration !== undefined) query.set("controllerGeneration", String(controllerGeneration));
-    const route = "/api/v1/controller/renew" + (query.toString() ? "?" + query.toString() : "");
-    return send<void>("POST", route);
+    return send<void>("POST", "/api/v1/controller/renew" + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)));
   },
 
   prepareMutation(request: PrepareMutationRequest): Promise<PrepareMutationResponse> {
