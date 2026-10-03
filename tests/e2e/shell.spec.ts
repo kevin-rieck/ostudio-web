@@ -35,6 +35,8 @@ test("controller connects, browses and searches; observer follows and cannot ope
     await other.getByRole("button", { name: "Sign in" }).click();
     await expect(other.getByRole("heading", { name: "Troubleshooting Session" })).toBeVisible();
     await expect(other.getByRole("button", { name: "Discover endpoints" })).toHaveCount(0);
+    await expect(other.getByRole("button", { name: "Browse", exact: true })).toHaveCount(0);
+    await expect(other.getByRole("button", { name: "Disconnect", exact: true })).toHaveCount(0);
     await page.getByLabel("Endpoint URL").fill(fixture.endpointUrl);
     await page.getByRole("button", { name: "Discover endpoints" }).click();
     await expect(page.getByRole("button", { name: "Connect anonymously" })).toBeEnabled();
@@ -48,9 +50,18 @@ test("controller connects, browses and searches; observer follows and cannot ope
     await page.getByLabel("Address Space Search").fill("Objects");
     await page.getByRole("button", { name: "Search", exact: true }).click();
     await expect(page.getByText(/[1-9]\d* result\(s\); coverage/)).toBeVisible();
+    await expect(page.getByRole("list", { name: "Search matches" }).getByText("Objects")).toBeVisible();
     await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+    await expect(page.getByText(/Read-Only Mode/)).toBeVisible();
+    await expect(page.getByRole("list", { name: "Search matches" })).toHaveCount(0);
     await expect(page.getByText(/disconnected · Controller/)).toBeVisible();
     await expect(other.getByText(/disconnected · Observer/)).toBeVisible();
+    await expect(other.getByText(/Read-Only Mode/)).toBeVisible();
+    await page.getByRole("button", { name: "Discover endpoints" }).click();
+    await expect(page.getByRole("button", { name: "Connect anonymously" })).toBeEnabled();
+    await fixture.server.shutdown();
+    await page.getByRole("button", { name: "Connect anonymously" }).click();
+    await expect(page.getByRole("region", { name: "Diagnostics" }).getByText(/connection_failed/)).toBeVisible();
   } finally {
     await observer.close();
   }

@@ -29,6 +29,18 @@ function projectionContext(): ProjectionContext {
   return { ancestors: new WeakSet<object>(), remaining: MAX_PROJECTION_VALUES };
 }
 
+export function safeAdvertisedUrl(advertised: string, requested: string): string | undefined {
+  try {
+    const url = new URL(advertised);
+    const expected = new URL(requested);
+    if (url.protocol !== "opc.tcp:" || url.username || url.password || url.search || url.hash ||
+        expected.username || expected.password || url.href !== expected.href || advertised.length > 4_096) return undefined;
+    return advertised;
+  } catch {
+    return undefined;
+  }
+}
+
 export function boundedString(value: string): string {
   return value.length <= MAX_STRING_LENGTH ? value : `${value.slice(0, MAX_STRING_LENGTH)}…`;
 }

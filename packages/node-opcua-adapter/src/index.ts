@@ -57,6 +57,7 @@ import type {
 } from "@ostudio/application";
 import {
   boundedString,
+  safeAdvertisedUrl,
   projectDataValue,
   projectLocalizedText,
   projectReference,
@@ -158,10 +159,10 @@ function securityPolicy(value: string | undefined): SecurityPolicy {
   return (value ?? SecurityPolicy.None) as SecurityPolicy;
 }
 
-function endpointProjection(endpoint: EndpointDescription): OpcUaEndpoint {
+function endpointProjection(endpoint: EndpointDescription, endpointUrl: string): OpcUaEndpoint {
   const mode = MessageSecurityMode[endpoint.securityMode] as OpcUaEndpoint["securityMode"];
   return {
-    endpointUrl: boundedString(endpoint.endpointUrl ?? ""),
+    endpointUrl,
     securityMode: mode,
     securityPolicyUri: boundedString(endpoint.securityPolicyUri ?? ""),
     serverCertificateFingerprint: mode === "None" ? undefined : fingerprint(endpoint.serverCertificate),
@@ -793,11 +794,13 @@ class NodeOpcuaAdapter implements OpcUaClient {
         productUri: boundedString(server.productUri ?? ""),
         applicationName: server.applicationName ? projectLocalizedText(server.applicationName) : undefined,
         discoveryUrls: (server.discoveryUrls ?? [])
-          .filter((url): url is string => typeof url === "string")
-          .slice(0, 32)
-          .map(boundedString),
+          .filter((url): url is string => typeof url === "string" && safeAdvertisedUrl(url, request.endpointUrl) !== undefined)
+          .slice(0, 32),
       })),
-      endpoints: result.endpoints.slice(0, 256).map(endpointProjection),
+      endpoints: result.endpoints
+        .filter((endpoint) => safeAdvertisedUrl(endpoint.endpointUrl ?? "", request.endpointUrl) !== undefined)
+        .slice(0, 256)
+        .map((endpoint) => endpointProjection(endpoint, request.endpointUrl)),
     };
   }
 
@@ -816,7 +819,7 @@ class NodeOpcuaAdapter implements OpcUaClient {
     );
     if (!selectedRaw)
       throw new NodeOpcuaAdapterError("endpoint_not_found", "The requested OPC UA endpoint was not advertised.");
-    const selected = endpointProjection(selectedRaw);
+    const selected = endpointProjection(selectedRaw, request.endpointUrl);
     if (mode !== "None" && !selectedRaw.serverCertificate) {
       throw new NodeOpcuaAdapterError(
         "server_certificate_required",

@@ -41,7 +41,9 @@ function snapshotForTransport(source: ApplicationSnapshot): Snapshot {
       ...(source.connection.securityMode ? { securityMode: source.connection.securityMode } : {}),
       ...(source.connection.identityStatus ? { identityStatus: source.connection.identityStatus } : {}),
     },
-    nodes: [...nodeMap.values()],
+    nodes: [...nodeMap.values()].slice(0, 10_000),
+    ...(source.browsed ? { browsed: source.browsed } : {}),
+    search: { ...source.search, results: source.search.results.slice(0, 10_000) },
   };
 }
 
@@ -49,13 +51,18 @@ export async function start(): Promise<void> {
   const serverRef: { current?: WebServer } = {};
   const application: ApplicationFacade = createApplication({
     clock: { now: () => new Date() },
-    events: { publish: () => serverRef.current?.publishEvent("snapshot-required", { reason: "reconnect" }) },
+    events: { publish: (event) => {
+      if (event.type === "diagnostic-changed") {
+        const record = event.snapshot.diagnostics.at(-1);
+        if (record) serverRef.current?.recordConnectionDiagnostic(record);
+      }
+      serverRef.current?.publishEvent("snapshot-required", { reason: "reconnect" });
+    } },
     clientFactory: (options) => createNodeOpcuaAdapter(options),
     savedConnections: { list: async () => [], save: async () => undefined },
   });
   const runtime = {
     snapshot: (): Snapshot => snapshotForTransport(application.snapshot()),
-    diagnostics: () => application.snapshot().diagnostics,
     discover: (request: { endpointUrl: string }): Promise<EndpointDiscoveryResult> => application.discover(request),
     connect: (request: { endpointUrl: string }): Promise<void> =>
       application.connect({

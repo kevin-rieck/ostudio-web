@@ -919,8 +919,12 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
       serialized(async () => {
         const currentSession = requireSession();
         const generation = state.connection.connectionGeneration;
-        if (browseRequests >= config.shallowBrowseRequestBudget)
-          throw new ApplicationError("browse_budget_exhausted", "The Troubleshooting Session browse budget is exhausted.");
+        if (browseRequests >= config.shallowBrowseRequestBudget) {
+          update((current) => ({ ...current, search: { ...current.search, coverage: "incomplete" } }), "search-changed");
+          return state.browsed?.nodeId === request.nodeId
+            ? { ...state.browsed, truncated: true }
+            : { nodeId: request.nodeId, references: [], status: { name: "Good", value: 0 }, requests: 0, truncated: true };
+        }
         const now = dependencies.clock.now().getTime();
         if (lastShallowBrowseAt !== undefined && now - lastShallowBrowseAt < config.shallowBrowseIntervalMilliseconds)
           throw new ApplicationError("browse_budget_exhausted", "Rate-Limited Browsing is available again shortly.");
@@ -989,11 +993,12 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
         }
       }
       if (session !== searchSession || state.connection.connectionGeneration !== searchGeneration) return state.search;
+      const matches = rankSearch([...indexed.values()], query);
       const search = {
         ...state.search,
-        results: rankSearch([...indexed.values()], query),
+        results: matches.slice(0, 10_000),
         coverage:
-          incompleteCoverage ||
+          matches.length > 10_000 || incompleteCoverage ||
           state.search.coverage === "incomplete" ||
           (session !== undefined && shallowBrowseQueue.length > 0)
             ? ("incomplete" as const)

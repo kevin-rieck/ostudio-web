@@ -173,8 +173,16 @@ describe("application facade", () => {
     expect(result.results).toMatchObject([{ nodeId: "ns=2;s=explicit", explicitBrowse: true, distance: 1 }]);
     expect(result.requests).toBe(2);
     now += 1_000;
-    await expect(application.browse({ nodeId: "i=85" })).rejects.toMatchObject({ code: "browse_budget_exhausted" });
+    await expect(application.browse({ nodeId: "i=85" })).resolves.toMatchObject({ truncated: true, references: [{ nodeId: "ns=2;s=explicit" }] });
+    expect(application.snapshot().search.coverage).toBe("incomplete");
     expect(browseCalls).toBe(2);
+  });
+
+  it("limits Address Space Search transport to 10,000 matches", async () => {
+    const application = createApplication({ clientFactory: client, savedConnections: store, clock: { now: () => new Date() }, events: { publish: () => undefined } });
+    const result = await application.search("pressure", Array.from({ length: 10_001 }, (_, index) => ({ nodeId: `node-${index}`, displayName: "pressure" })));
+    expect(result.results).toHaveLength(10_000);
+    expect(result.coverage).toBe("incomplete");
   });
 
   it("orders display exact matches separately and uses safe connection references", async () => {

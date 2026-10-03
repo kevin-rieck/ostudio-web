@@ -169,7 +169,6 @@ describe("server routes", () => {
       env: developmentEnvironment,
       runtime: {
         snapshot: runtimeSnapshot,
-        diagnostics: () => [{ code: "connection_failed", endpoint: "opc.tcp://plc:4840", outcome: "unknown" }],
         discover: async () => ({
           servers: [],
           endpoints: [
@@ -234,8 +233,12 @@ describe("server routes", () => {
       payload: { endpointUrl: "opc.tcp://plc:4840" },
     });
     expect(discovered.statusCode).toBe(200);
-    expect((await server.inject({ method: "GET", url: "/api/v1/diagnostics", headers: { cookie: observer } })).json())
-      .toEqual([{ code: "connection_failed", endpoint: "opc.tcp://plc:4840", outcome: "unknown" }]);
+    server.recordConnectionDiagnostic({ code: "connection_failed", endpoint: "opc.tcp://admin:secret@plc:4840/private", outcome: "unknown" });
+    const diagnostics = (await server.inject({ method: "GET", url: "/api/v1/diagnostics", headers: { cookie: observer } })).json();
+    expect(diagnostics).toMatchObject([{ code: "connection_failed", actor: "admin", endpoint: "opc.tcp://plc:4840", controllerGeneration: 1, outcome: "unknown" }]);
+    expect(diagnostics[0].operationId).toMatch(/^op-[A-Za-z0-9]{20,64}$/);
+    expect(diagnostics[0].correlationId).toMatch(/^cor-[A-Za-z0-9]{20,64}$/);
+    expect(JSON.stringify(diagnostics)).not.toMatch(/secret|private/);
     expect((await server.inject({
       method: "POST",
       url: "/api/v1/opcua/connect?controllerGeneration=0",

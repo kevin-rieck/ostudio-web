@@ -2,10 +2,8 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   ApiClientError,
   createApiClient,
-  type BrowseResult,
   type DiagnosticReport,
   type EndpointDiscoveryResult,
-  type SearchResult,
   type Snapshot,
 } from "@ostudio/contracts";
 
@@ -21,15 +19,13 @@ export function App() {
   const [password, setPassword] = useState("");
   const [message, setMessage] = useState<string>();
   const [insecureDevelopment, setInsecureDevelopment] = useState(false);
-  const [controllerRole, setControllerRole] = useState<"controller" | "observer">("observer");
   const [snapshot, setSnapshot] = useState<Snapshot>();
+  const controllerRole = snapshot?.controller.role ?? "observer";
   const [endpointUrl, setEndpointUrl] = useState("");
   const [discovery, setDiscovery] = useState<EndpointDiscoveryResult>();
   const [diagnostics, setDiagnostics] = useState<DiagnosticReport>([]);
   const [browseNodeId, setBrowseNodeId] = useState("i=84");
-  const [browseResult, setBrowseResult] = useState<BrowseResult>();
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchResult, setSearchResult] = useState<SearchResult>();
   const [working, setWorking] = useState(false);
   const controllerControls = useRef<{ setGeneration(generation: number): void; startRenewal(): void } | undefined>(undefined);
 
@@ -45,7 +41,6 @@ export function App() {
 
   useEffect(() => {
     if (!authenticated) {
-      setControllerRole("observer");
       setSnapshot(undefined);
       return;
     }
@@ -65,7 +60,8 @@ export function App() {
       renewTimer = window.setInterval(() => {
         void api.renewControllerLease(controllerGeneration!).catch(() => {
           stopRenewal();
-          setControllerRole("observer");
+          setSnapshot(undefined);
+          void refreshSnapshot().catch(() => undefined);
         });
       }, 5_000);
     };
@@ -74,7 +70,6 @@ export function App() {
       if (!stopped) {
         setDiagnostics(report);
         setSnapshot(current);
-        setControllerRole(current.controller.role);
         controllerGeneration = current.controller.controllerGeneration;
         if (current.controller.role === "controller") startRenewal();
         else stopRenewal();
@@ -114,13 +109,11 @@ export function App() {
       .attachController()
       .then((controller) => {
         if (stopped) return;
-        setControllerRole(controller.role);
         controllerGeneration = controller.controllerGeneration;
         if (controller.role === "controller") startRenewal();
         void connectEvents();
       })
       .catch(() => {
-        setControllerRole("observer");
         void connectEvents();
       });
     return () => {
@@ -176,7 +169,6 @@ export function App() {
     await withWorking(async () => {
       const current = await api.connectOpcUa({ endpointUrl: selected.endpointUrl }, snapshot!.controller.controllerGeneration);
       setSnapshot(current);
-      setControllerRole(current.controller.role);
     }, "The OPC UA Server connection failed.");
   }
 
@@ -185,21 +177,25 @@ export function App() {
       const current = await api.disconnectOpcUa(snapshot!.controller.controllerGeneration);
       setSnapshot(current);
       setDiscovery(undefined);
-      setBrowseResult(undefined);
-      setSearchResult(undefined);
     }, "The OPC UA Server could not be disconnected.");
   }
 
   async function browse(): Promise<void> {
     await withWorking(
-      async () => setBrowseResult(await api.browseAddressSpace({ nodeId: browseNodeId }, snapshot!.controller.controllerGeneration)),
+      async () => {
+        await api.browseAddressSpace({ nodeId: browseNodeId }, snapshot!.controller.controllerGeneration);
+        setSnapshot(await api.getSnapshot());
+      },
       "Address Space browsing failed.",
     );
   }
 
   async function search(): Promise<void> {
     await withWorking(
-      async () => setSearchResult(await api.searchAddressSpace({ query: searchQuery }, snapshot!.controller.controllerGeneration)),
+      async () => {
+        await api.searchAddressSpace({ query: searchQuery }, snapshot!.controller.controllerGeneration);
+        setSnapshot(await api.getSnapshot());
+      },
       "Address Space Search failed.",
     );
   }
@@ -207,7 +203,6 @@ export function App() {
   async function recoverControl(): Promise<void> {
     await withWorking(async () => {
       const controller = await api.recoverController();
-      setControllerRole(controller.role);
       controllerControls.current?.setGeneration(controller.controllerGeneration);
       setSnapshot((current) => current && { ...current, controller });
       controllerControls.current?.startRenewal();
@@ -217,7 +212,6 @@ export function App() {
   async function takeOver(): Promise<void> {
     await withWorking(async () => {
       const controller = await api.takeOverController();
-      setControllerRole(controller.role);
       controllerControls.current?.setGeneration(controller.controllerGeneration);
       setSnapshot((current) => current && { ...current, controller });
       controllerControls.current?.startRenewal();
@@ -318,9 +312,9 @@ export function App() {
                   Browse
                 </button>
               </div>
-              {browseResult && (
+              {snapshot.browsed && (
                 <ul>
-                  {browseResult.references.map((reference) => (
+                  {snapshot.browsed.references.map((reference) => (
                     <li key={reference.nodeId}>
                       <button type="button" onClick={() => setBrowseNodeId(reference.nodeId)}>
                         {reference.displayName.text ?? reference.browseName.name ?? reference.nodeId}
@@ -339,10 +333,17 @@ export function App() {
                   Search
                 </button>
               </div>
-              {searchResult && (
-                <p role="status">
-                  {searchResult.results.length} result(s); coverage {searchResult.coverage}.
-                </p>
+              {snapshot.search && (
+                <>
+                  <p role="status">{snapshot.search.results.length} result(s); coverage {snapshot.search.coverage}.</p>
+                  <ul aria-label="Search matches">{snapshot.search.results.map((match) => (
+                    <li key={match.nodeId}>
+                      <button type="button" onClick={() => setBrowseNodeId(match.nodeId)}>
+                        {match.displayName ?? match.browseName ?? match.nodeId}
+                      </button>
+                    </li>
+                  ))}</ul>
+                </>
               )}
             </section>
           )}

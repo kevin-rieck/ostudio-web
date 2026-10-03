@@ -8,7 +8,7 @@ import {
   loginRequestSchema,
   type BrowseRequest,
   type BrowseResult,
-  type DiagnosticReport,
+  type ConnectionDiagnostic,
   type EndpointDiscoveryRequest,
   type EndpointDiscoveryResult,
   type EventEnvelope,
@@ -31,7 +31,6 @@ export interface TimerScheduler {
 
 export interface RuntimeShutdownHooks {
   snapshot?(): Snapshot;
-  diagnostics?(): DiagnosticReport;
   discover?(request: EndpointDiscoveryRequest): Promise<EndpointDiscoveryResult>;
   connect?(request: EndpointDiscoveryRequest): Promise<void>;
   browse?(request: BrowseRequest): Promise<BrowseResult>;
@@ -55,6 +54,7 @@ export interface ServerOptions {
 export interface WebServer extends FastifyInstance {
   eventSequence(): number;
   publishEvent(type: EventType, payload: EventEnvelope["payload"]): EventEnvelope;
+  recordConnectionDiagnostic(record: Pick<ConnectionDiagnostic, "code" | "outcome"> & { endpoint?: string }): void;
   shutdown(): Promise<void>;
 }
 
@@ -261,6 +261,23 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   let controllerOwner: string | undefined;
   let recoverableControllerSessionId: string | undefined;
   let controllerGeneration = 0;
+  const diagnostics: ConnectionDiagnostic[] = [];
+  const recordConnectionDiagnostic = (record: Pick<ConnectionDiagnostic, "code" | "outcome"> & { endpoint?: string }): void => {
+    let endpoint = "OPC UA Server";
+    try {
+      if (record.endpoint) {
+        const url = new URL(record.endpoint);
+        if (url.protocol === "opc.tcp:") endpoint = `${url.protocol}//${url.host}`.slice(0, 256);
+      }
+    } catch { /* No untrusted endpoint text reaches diagnostics. */ }
+    diagnostics.push({
+      code: record.code, actor: "admin", endpoint, controllerGeneration,
+      operationId: `op-${randomBytes(16).toString("hex")}`,
+      correlationId: `cor-${randomBytes(16).toString("hex")}`,
+      outcome: record.outcome,
+    });
+    if (diagnostics.length > 100) diagnostics.shift();
+  };
   let controllerLeaseExpiresAt: number | undefined;
   let controllerExpiryTimer: unknown;
   let disconnectGraceTimer: unknown;
@@ -433,6 +450,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
 
   server.decorate("eventSequence", eventSequence);
   server.decorate("publishEvent", publishEvent);
+  server.decorate("recordConnectionDiagnostic", recordConnectionDiagnostic);
   server.decorate("shutdown", async (): Promise<void> => {
     if (shutdownPromise) return shutdownPromise;
     shutdownPromise = (async () => {
@@ -782,7 +800,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       return runtimeError(reply, "operation_failed");
     }
   }));
-  server.get("/api/v1/diagnostics", async () => options.runtime?.diagnostics?.() ?? []);
+  server.get("/api/v1/diagnostics", async () => diagnostics);
   server.get("/api/v1/events", async (request, reply) => {
     const rawAfter = new URL(request.url, config.publicOrigin).searchParams.get("afterSequence");
     const after = rawAfter === null ? 0 : Number(rawAfter);

@@ -575,7 +575,9 @@
           "safety": { "$ref": "#/components/schemas/SafetyState" },
           "connection": { "$ref": "#/components/schemas/ConnectionSummary" },
           "selectedNodeId": { "type": "string", "maxLength": 512 },
-          "nodes": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/components/schemas/AddressSpaceNode" } }
+          "nodes": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/components/schemas/AddressSpaceNode" } },
+          "browsed": { "$ref": "#/components/schemas/BrowseResult" },
+          "search": { "$ref": "#/components/schemas/SearchResult" }
         }
       },
       "ControllerState": {
@@ -728,10 +730,14 @@
       "ConnectionDiagnostic": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["code", "outcome"],
+        "required": ["code", "actor", "endpoint", "controllerGeneration", "operationId", "correlationId", "outcome"],
         "properties": {
           "code": { "type": "string", "enum": ["connection_failed", "connection_lost"] },
+          "actor": { "type": "string", "maxLength": 64 },
           "endpoint": { "type": "string", "maxLength": 256 },
+          "controllerGeneration": { "type": "integer", "minimum": 0 },
+          "operationId": { "$ref": "#/components/schemas/OperationId" },
+          "correlationId": { "$ref": "#/components/schemas/CorrelationId" },
           "outcome": { "type": "string", "enum": ["unknown"] }
         }
       },

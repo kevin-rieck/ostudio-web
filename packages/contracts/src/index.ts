@@ -121,6 +121,8 @@ export interface Snapshot {
   connection: ConnectionSummary;
   selectedNodeId?: string;
   nodes: AddressSpaceNode[];
+  browsed?: BrowseResult;
+  search?: SearchResult;
 }
 
 export interface ControllerState {
@@ -211,7 +213,11 @@ export type DiagnosticReport = (DiagnosticRecord | ConnectionDiagnostic)[];
 
 export interface ConnectionDiagnostic {
   code: "connection_failed" | "connection_lost";
-  endpoint?: string;
+  actor: string;
+  endpoint: string;
+  controllerGeneration: number;
+  operationId: OperationId;
+  correlationId: CorrelationId;
   outcome: "unknown";
 }
 
