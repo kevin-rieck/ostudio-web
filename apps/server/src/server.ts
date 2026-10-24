@@ -25,6 +25,7 @@ const DEFAULT_CONTROLLER_LEASE_MS = 15_000;
 const DEFAULT_CONTROLLER_DISCONNECT_GRACE_MS = 5 * 60_000;
 const SSE_QUEUE_LIMIT = 100;
 const SSE_HEARTBEAT_MS = 15_000;
+const SHA256_PIN = /^sha256:[0-9a-f]{64}$/;
 type EventType = EventEnvelope["type"];
 type Environment = NodeJS.ProcessEnv;
 export interface TimerScheduler {
@@ -33,6 +34,8 @@ export interface TimerScheduler {
   setInterval?(callback: () => void, milliseconds: number): unknown;
   clearInterval?(handle: unknown): void;
 }
+
+export type SavedConnectionConnectResult = { outcome: "not_found" };
 
 export interface RuntimeShutdownHooks {
   snapshot?(): Snapshot;
@@ -43,7 +46,10 @@ export interface RuntimeShutdownHooks {
   listSavedConnections?(): Promise<SavedConnectionList>;
   saveSavedConnection?(id: string, request: SavedConnectionRequest): Promise<void>;
   deleteSavedConnection?(id: string): Promise<void>;
-  connectSavedConnection?(id: string, request: SavedConnectionConnectRequest): Promise<void>;
+  connectSavedConnection?(
+    id: string,
+    request: SavedConnectionConnectRequest,
+  ): Promise<void | SavedConnectionConnectResult>;
   setReadOnly?(readOnly: true): Promise<void> | void;
   disconnect?(): Promise<void>;
   close?(): Promise<void>;
@@ -811,22 +817,22 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     const body = request.body;
     return body && typeof body === "object" ? (body as T) : undefined;
   };
-  const endpointRequest = (request: FastifyRequest): EndpointDiscoveryRequest | undefined => {
-    const body = requestBody<EndpointDiscoveryRequest>(request);
-    if (
-      !body ||
-      typeof body.endpointUrl !== "string" ||
-      body.endpointUrl.length === 0 ||
-      body.endpointUrl.length > 2048
-    )
-      return undefined;
+  const sanitizeEndpoint = (value: unknown): string | undefined => {
+    if (typeof value !== "string" || value.length === 0 || value.length > 2048) return undefined;
     try {
-      const endpoint = new URL(body.endpointUrl);
-      if (endpoint.protocol !== "opc.tcp:" || endpoint.username || endpoint.password) return undefined;
+      const endpoint = new URL(value);
+      if (endpoint.protocol !== "opc.tcp:" || !endpoint.hostname) return undefined;
+      endpoint.username = "";
+      endpoint.password = "";
+      return `${endpoint.protocol}//${endpoint.host}${endpoint.pathname === "/" ? "" : endpoint.pathname}${endpoint.search}${endpoint.hash}`;
     } catch {
       return undefined;
     }
-    return { endpointUrl: body.endpointUrl };
+  };
+  const endpointRequest = (request: FastifyRequest): EndpointDiscoveryRequest | undefined => {
+    const body = requestBody<EndpointDiscoveryRequest>(request);
+    const endpointUrl = sanitizeEndpoint(body?.endpointUrl);
+    return endpointUrl === undefined ? undefined : { endpointUrl };
   };
   const savedConnectionId = (request: FastifyRequest): string | undefined => {
     const id = (request.params as { id?: unknown } | undefined)?.id;
@@ -848,22 +854,15 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       !["None", "Sign", "SignAndEncrypt"].includes(body.securityMode ?? "")
     )
       return undefined;
-    try {
-      const endpoint = new URL(body.endpoint);
-      if (endpoint.protocol !== "opc.tcp:" || endpoint.username || endpoint.password) return undefined;
-    } catch {
-      return undefined;
-    }
+    const endpoint = sanitizeEndpoint(body.endpoint);
+    if (endpoint === undefined) return undefined;
     if (body.username !== undefined && (typeof body.username !== "string" || body.username.length > 256))
       return undefined;
-    if (
-      body.serverCertificatePin !== undefined &&
-      (typeof body.serverCertificatePin !== "string" || body.serverCertificatePin.length > 512)
-    )
-      return undefined;
-    if (body.certificateReviewRequired !== undefined && typeof body.certificateReviewRequired !== "boolean")
-      return undefined;
-    return body as SavedConnectionRequest;
+    const hasValidPin = typeof body.serverCertificatePin === "string" && SHA256_PIN.test(body.serverCertificatePin);
+    if (body.serverCertificatePin !== undefined && !hasValidPin) return undefined;
+    if (body.certificateReviewRequired !== undefined && body.certificateReviewRequired !== true) return undefined;
+    if (body.securityMode !== "None" && !hasValidPin && body.certificateReviewRequired !== true) return undefined;
+    return { ...body, endpoint } as SavedConnectionRequest;
   };
   const savedConnectionConnectRequest = (request: FastifyRequest): SavedConnectionConnectRequest => {
     const body = requestBody<{ userSecret?: unknown; password?: unknown }>(request);
@@ -924,7 +923,11 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
         let body: SavedConnectionConnectRequest;
         try {
           body = savedConnectionConnectRequest(request);
-          await options.runtime.connectSavedConnection(id, body);
+          const result = await options.runtime.connectSavedConnection(id, body);
+          if (result?.outcome === "not_found")
+            return void reply
+              .code(404)
+              .send(errorBody("saved_connection_not_found", "The Saved Connection was not found."));
           return currentSnapshot(request);
         } catch {
           return runtimeError(reply, "connection_failed");

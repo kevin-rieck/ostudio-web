@@ -7,8 +7,9 @@ import type {
   EndpointDiscoveryResult,
   SearchResult,
   Snapshot,
+  SavedConnectionRequest,
 } from "@ostudio/contracts";
-import { createServer, type WebServer } from "./server.js";
+import { createServer, type SavedConnectionConnectResult, type WebServer } from "./server.js";
 import { createFileSavedConnectionStore, createMemorySavedConnectionStore } from "./saved-connections.js";
 
 function snapshotForTransport(source: ApplicationSnapshot): Snapshot {
@@ -55,7 +56,7 @@ export async function start(): Promise<void> {
   const savedConnections =
     process.env.OSTUDIO_EPHEMERAL === "true"
       ? createMemorySavedConnectionStore()
-      : await createFileSavedConnectionStore(process.env.OSTUDIO_DATA_DIRECTORY ?? "/data");
+      : await createFileSavedConnectionStore("/data");
   const application: ApplicationFacade = createApplication({
     clock: { now: () => new Date() },
     events: {
@@ -83,24 +84,16 @@ export async function start(): Promise<void> {
       mode: savedConnections.mode,
       savedConnections: await application.listSavedConnections(),
     }),
-    saveSavedConnection: async (
-      id: string,
-      request: {
-        name: string;
-        endpoint: string;
-        securityPolicy: string;
-        securityMode: "None" | "Sign" | "SignAndEncrypt";
-        username?: string;
-        serverCertificatePin?: string;
-        certificateReviewRequired?: boolean;
-      },
-    ) => {
+    saveSavedConnection: async (id: string, request: SavedConnectionRequest) => {
       await application.saveSavedConnection({ id, ...request });
     },
     deleteSavedConnection: (id: string): Promise<void> => application.removeSavedConnection(id),
-    connectSavedConnection: async (id: string, request: { userSecret?: string }): Promise<void> => {
+    connectSavedConnection: async (
+      id: string,
+      request: { userSecret?: string },
+    ): Promise<void | SavedConnectionConnectResult> => {
       const saved = (await application.listSavedConnections()).find((connection) => connection.id === id);
-      if (!saved) throw new Error("Saved Connection not found.");
+      if (!saved) return { outcome: "not_found" as const };
       if (saved.certificateReviewRequired) throw new Error("Saved Connection certificate requires review.");
       if (saved.username !== undefined && request.userSecret === undefined)
         throw new Error("A user secret is required for this Saved Connection.");

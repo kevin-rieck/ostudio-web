@@ -11,7 +11,7 @@ const connection = {
   securityPolicy: "None",
   securityMode: "None" as const,
   username: "admin",
-  serverCertificatePin: "sha256:abc",
+  serverCertificatePin: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 };
 
 describe("saved connection storage", () => {
@@ -26,11 +26,48 @@ describe("saved connection storage", () => {
     await expect(store.list()).resolves.toEqual([]);
   });
 
+  it("rejects secure records without a pin unless certificate review is required", async () => {
+    const store = createMemorySavedConnectionStore();
+    await expect(
+      store.save({ ...connection, securityMode: "SignAndEncrypt", serverCertificatePin: undefined }),
+    ).rejects.toThrow(/certificate pin/i);
+    await expect(
+      store.save({
+        ...connection,
+        securityMode: "SignAndEncrypt",
+        serverCertificatePin: undefined,
+        certificateReviewRequired: true,
+      }),
+    ).resolves.toBeUndefined();
+    await expect(store.save({ ...connection, securityMode: "SignAndEncrypt" })).resolves.toBeUndefined();
+  });
+
+  it.each(["sha256:abc", "0123456789abcdef0123456789abcdef01234567"])(
+    "rejects malformed certificate pin %s at the persisted store boundary",
+    async (serverCertificatePin) => {
+      const store = createMemorySavedConnectionStore();
+      await expect(store.save({ ...connection, securityMode: "SignAndEncrypt", serverCertificatePin })).rejects.toThrow(
+        /certificate pin/i,
+      );
+    },
+  );
+
+  it("rejects a 101st record in ephemeral storage", async () => {
+    const store = createMemorySavedConnectionStore();
+    for (let index = 0; index < 100; index++) await store.save({ ...connection, id: String(index) });
+    await expect(store.save({ ...connection, id: "overflow" })).rejects.toThrow(/limit/i);
+  });
+
   it("persists only an allowlisted connection envelope with restrictive modes", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "ostudio-saved-"));
     const store = await createFileSavedConnectionStore(directory);
     expect(store.mode).toBe("durable");
-    await store.save({ ...connection, password: "must-not-persist", privateKeyPath: "C:\\private.key" } as never);
+    await store.save({
+      ...connection,
+      password: "must-not-persist",
+      privateKeyPath: "C:\\private.key",
+      clientCertificateReference: "client-certificate.pem",
+    } as never);
     const file = path.join(directory, "saved-connections.json");
     const raw = await readFile(file, "utf8");
     expect(raw).toContain('"version":1');
@@ -42,6 +79,31 @@ describe("saved connection storage", () => {
     }
     const reopened = await createFileSavedConnectionStore(directory);
     await expect(reopened.list()).resolves.toEqual([connection]);
+  });
+
+  it("flags legacy server certificate thumbprints for review instead of treating them as pins", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "ostudio-legacy-thumbprint-"));
+    const file = path.join(directory, "saved-connections.json");
+    await (
+      await import("node:fs/promises")
+    ).writeFile(
+      file,
+      JSON.stringify([
+        {
+          id: "legacy",
+          name: "Legacy PLC",
+          endpointUrl: "opc.tcp://legacy:4840",
+          securityPolicy: "Basic256Sha256",
+          securityMode: "MessageSecurityModeSignAndEncrypt",
+          serverCertificateThumbprint: "0123456789abcdef0123456789abcdef01234567",
+        },
+      ]),
+    );
+
+    const store = await createFileSavedConnectionStore(directory);
+    const [migrated] = await store.list();
+    expect(migrated).toMatchObject({ id: "legacy", certificateReviewRequired: true });
+    expect(migrated).not.toHaveProperty("serverCertificatePin");
   });
 
   it("backs up and migrates the legacy desktop array before serving it", async () => {
@@ -70,7 +132,6 @@ describe("saved connection storage", () => {
         endpoint: "opc.tcp://legacy:4840",
         securityMode: "SignAndEncrypt",
         username: "engineer",
-        serverCertificatePin: "sha256:legacy",
         certificateReviewRequired: true,
       },
     ]);

@@ -18,7 +18,7 @@ export interface ApiError {
   retryable?: boolean;
 }
 
-export type ErrorCode = "authentication_required" | "bad_request" | "internal_error" | "confirmation_required" | "controller_required" | "controller_generation_mismatch" | "challenge_expired" | "connection_required" | "mutation_not_allowed" | "operation_id_limit_reached" | "operation_result_unavailable" | "origin_rejected" | "request_too_large" | "safety_generation_mismatch" | "watchlist_limit_reached" | "browse_budget_exhausted" | "discovery_failed" | "connection_failed" | "operation_failed";
+export type ErrorCode = "authentication_required" | "bad_request" | "internal_error" | "confirmation_required" | "controller_required" | "controller_generation_mismatch" | "challenge_expired" | "connection_required" | "mutation_not_allowed" | "operation_id_limit_reached" | "operation_result_unavailable" | "origin_rejected" | "request_too_large" | "safety_generation_mismatch" | "watchlist_limit_reached" | "browse_budget_exhausted" | "discovery_failed" | "connection_failed" | "operation_failed" | "saved_connection_not_found";
 
 export interface EndpointDiscoveryRequest {
   endpointUrl: string;

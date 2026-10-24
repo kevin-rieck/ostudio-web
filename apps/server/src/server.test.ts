@@ -128,12 +128,14 @@ describe("server routes", () => {
 
   it("manages Saved Connections through authenticated controller routes", async () => {
     const calls: string[] = [];
+    let savedEndpoint = "";
     server = await createServer({
       env: developmentEnvironment,
       runtime: {
         listSavedConnections: async () => ({ mode: "durable", savedConnections: [] }),
-        saveSavedConnection: async (id) => {
+        saveSavedConnection: async (id, request) => {
           calls.push(`save:${id}`);
+          savedEndpoint = request.endpoint;
         },
         deleteSavedConnection: async (id) => {
           calls.push(`delete:${id}`);
@@ -168,7 +170,7 @@ describe("server routes", () => {
           headers,
           payload: {
             name: "PLC",
-            endpoint: "opc.tcp://plc:4840",
+            endpoint: "opc.tcp://engineer:secret@plc:4840/path",
             securityPolicy: "None",
             securityMode: "None",
           },
@@ -195,6 +197,103 @@ describe("server routes", () => {
       ).statusCode,
     ).toBe(204);
     expect(calls).toEqual(["save:plc", "connect:plc:transient", "delete:plc"]);
+    expect(savedEndpoint).toBe("opc.tcp://plc:4840/path");
+  });
+
+  it("rejects unsafe secure Saved Connection certificate pins at the HTTP boundary", async () => {
+    const saved: Array<import("@ostudio/contracts").SavedConnectionRequest> = [];
+    server = await createServer({
+      env: developmentEnvironment,
+      runtime: {
+        saveSavedConnection: async (_id, request) => {
+          saved.push(request);
+        },
+      },
+    });
+    const login = await server.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { origin: "http://localhost:8080" },
+      payload: { username: "admin", password: "correct horse battery staple" },
+    });
+    const cookie = String(login.headers["set-cookie"]);
+    const headers = { origin: "http://localhost:8080", cookie };
+    await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers });
+    const secure = {
+      name: "PLC",
+      endpoint: "opc.tcp://plc:4840",
+      securityPolicy: "Basic256Sha256",
+      securityMode: "SignAndEncrypt" as const,
+    };
+    for (const pin of [undefined, "sha256:abc", "0123456789abcdef0123456789abcdef01234567"]) {
+      const response = await server.inject({
+        method: "PUT",
+        url: "/api/v1/saved-connections/plc?controllerGeneration=1",
+        headers,
+        payload: { ...secure, ...(pin === undefined ? {} : { serverCertificatePin: pin }) },
+      });
+      expect(response.statusCode).toBe(400);
+    }
+    const valid = await server.inject({
+      method: "PUT",
+      url: "/api/v1/saved-connections/valid?controllerGeneration=1",
+      headers,
+      payload: {
+        ...secure,
+        serverCertificatePin: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      },
+    });
+    expect(valid.statusCode).toBe(204);
+    const review = await server.inject({
+      method: "PUT",
+      url: "/api/v1/saved-connections/legacy?controllerGeneration=1",
+      headers,
+      payload: { ...secure, certificateReviewRequired: true },
+    });
+    expect(review.statusCode).toBe(204);
+    expect(saved).toHaveLength(2);
+  });
+
+  it("returns typed not-found and bad-request responses for Saved Connection reconnects", async () => {
+    server = await createServer({
+      env: developmentEnvironment,
+      runtime: {
+        snapshot: () => ({
+          sequence: 0,
+          buildVersion: "test",
+          generatedAt: new Date(0).toISOString(),
+          controller: { role: "controller", controllerGeneration: 1 },
+          safety: { readOnly: true, safetyGeneration: 1 },
+          connection: { state: "disconnected" },
+          nodes: [],
+        }),
+        connectSavedConnection: async () => ({ outcome: "not_found" }),
+      },
+    });
+    const login = await server.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { origin: "http://localhost:8080" },
+      payload: { username: "admin", password: "correct horse battery staple" },
+    });
+    const cookie = String(login.headers["set-cookie"]);
+    const headers = { origin: "http://localhost:8080", cookie };
+    await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers });
+    const missing = await server.inject({
+      method: "POST",
+      url: "/api/v1/saved-connections/plc/connect?controllerGeneration=1",
+      headers,
+    });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json()).toMatchObject({ code: "saved_connection_not_found" });
+
+    const invalid = await server.inject({
+      method: "POST",
+      url: "/api/v1/saved-connections/not%20valid/connect?controllerGeneration=1",
+      headers,
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json()).toMatchObject({ code: "bad_request" });
   });
 
   it("uses one generic failed-login response and rejects cross-origin state changes", async () => {

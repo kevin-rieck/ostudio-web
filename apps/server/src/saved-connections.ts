@@ -6,6 +6,7 @@ import type { SavedConnection, SavedConnectionStore } from "@ostudio/application
 const VERSION = 1;
 const FILE_NAME = "saved-connections.json";
 const MAX_CONNECTIONS = 100;
+const SHA256_PIN = /^sha256:[0-9a-f]{64}$/;
 
 type PersistedConnection = Omit<SavedConnection, "clientCertificateReference">;
 type Envelope = { version: 1; savedConnections: PersistedConnection[] };
@@ -68,13 +69,17 @@ function parseConnection(value: unknown): PersistedConnection {
     securityMode,
   };
   if (record.username !== undefined) connection.username = boundedString(record.username, "username", 256);
-  if (record.serverCertificatePin !== undefined)
-    connection.serverCertificatePin = boundedString(record.serverCertificatePin, "server certificate pin", 512);
-  if (record.certificateReviewRequired !== undefined) {
-    if (record.certificateReviewRequired !== true)
-      throw new Error("Saved Connection certificate review flag is invalid.");
-    connection.certificateReviewRequired = true;
+  const certificateReviewRequired = record.certificateReviewRequired === true;
+  if (record.certificateReviewRequired !== undefined && !certificateReviewRequired)
+    throw new Error("Saved Connection certificate review flag is invalid.");
+  if (record.serverCertificatePin !== undefined) {
+    const pin = boundedString(record.serverCertificatePin, "server certificate pin", 512);
+    if (!SHA256_PIN.test(pin)) throw new Error("Saved Connection server certificate pin is invalid.");
+    connection.serverCertificatePin = pin;
   }
+  if (certificateReviewRequired) connection.certificateReviewRequired = true;
+  if (securityMode !== "None" && !certificateReviewRequired && connection.serverCertificatePin === undefined)
+    throw new Error("A secure Saved Connection requires a server certificate pin.");
   return connection;
 }
 
@@ -118,6 +123,8 @@ function migrateLegacy(value: unknown): Envelope {
       record.certificatePath,
       record.privateKeyPath,
       record.clientCertificatePath,
+      // Legacy thumbprints may be SHA-1; review them instead of treating them as SHA-256 pins.
+      record.serverCertificateThumbprint,
     ].some((candidate) => typeof candidate === "string" && candidate.length > 0);
     return parseConnection({
       id: record.id,
@@ -126,9 +133,6 @@ function migrateLegacy(value: unknown): Envelope {
       securityPolicy: record.securityPolicy ?? "None",
       securityMode,
       ...(record.username === undefined ? {} : { username: record.username }),
-      ...(record.serverCertificateThumbprint === undefined
-        ? {}
-        : { serverCertificatePin: record.serverCertificateThumbprint }),
       ...(certificateReviewRequired ? { certificateReviewRequired: true } : {}),
     });
   });
@@ -189,7 +193,8 @@ export function createMemorySavedConnectionStore(): SavedConnectionStoreAdapter 
     mode: "ephemeral",
     list: async () => [...records.values()].map(clone),
     save: async (connection) => {
-      const safe = persisted(connection as StoredConnection);
+      const safe = parseConnection(persisted(connection as StoredConnection));
+      if (!records.has(safe.id) && records.size >= MAX_CONNECTIONS) throw new Error("Saved Connection limit reached.");
       records.set(safe.id, clone(safe));
     },
     remove: async (id) => {

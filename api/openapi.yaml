@@ -298,8 +298,9 @@
             "description": "The Saved Connection was connected in Read-Only Mode.",
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Snapshot" } } }
           },
+          "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
-          "404": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/SavedConnectionNotFound" },
           "409": { "$ref": "#/components/responses/ControllerUnavailable" },
           "502": { "$ref": "#/components/responses/InternalError" }
         }
@@ -424,6 +425,10 @@
         "description": "The request could not be completed.",
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
       },
+      "SavedConnectionNotFound": {
+        "description": "The requested Saved Connection does not exist.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
+      },
       "BadRequest": {
         "description": "The request is invalid.",
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
@@ -501,7 +506,8 @@
           "browse_budget_exhausted",
           "discovery_failed",
           "connection_failed",
-          "operation_failed"
+          "operation_failed",
+          "saved_connection_not_found"
         ]
       },
       "EndpointDiscoveryRequest": {
@@ -521,9 +527,18 @@
           "securityPolicy": { "type": "string", "minLength": 1, "maxLength": 256 },
           "securityMode": { "type": "string", "enum": ["None", "Sign", "SignAndEncrypt"] },
           "username": { "type": "string", "maxLength": 256 },
-          "serverCertificatePin": { "type": "string", "maxLength": 512 },
-          "certificateReviewRequired": { "type": "boolean" }
-        }
+          "serverCertificatePin": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "certificateReviewRequired": { "type": "boolean", "const": true }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "securityMode": { "enum": ["Sign", "SignAndEncrypt"] } } },
+            "then": { "anyOf": [
+              { "required": ["serverCertificatePin"] },
+              { "required": ["certificateReviewRequired"] }
+            ] }
+          }
+        ]
       },
       "SavedConnectionRequest": {
         "type": "object",
@@ -535,9 +550,18 @@
           "securityPolicy": { "type": "string", "minLength": 1, "maxLength": 256 },
           "securityMode": { "type": "string", "enum": ["None", "Sign", "SignAndEncrypt"] },
           "username": { "type": "string", "maxLength": 256 },
-          "serverCertificatePin": { "type": "string", "maxLength": 512 },
-          "certificateReviewRequired": { "type": "boolean" }
-        }
+          "serverCertificatePin": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "certificateReviewRequired": { "type": "boolean", "const": true }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "securityMode": { "enum": ["Sign", "SignAndEncrypt"] } } },
+            "then": { "anyOf": [
+              { "required": ["serverCertificatePin"] },
+              { "required": ["certificateReviewRequired"] }
+            ] }
+          }
+        ]
       },
       "SavedConnectionConnectRequest": {
         "type": "object",
