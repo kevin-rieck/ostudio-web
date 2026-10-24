@@ -4,6 +4,7 @@ import {
   createApiClient,
   type DiagnosticReport,
   type EndpointDiscoveryResult,
+  type SavedConnection,
   type Snapshot,
 } from "@ostudio/contracts";
 
@@ -23,6 +24,15 @@ export function App() {
   const controllerRole = snapshot?.controller.role ?? "observer";
   const [endpointUrl, setEndpointUrl] = useState("");
   const [discovery, setDiscovery] = useState<EndpointDiscoveryResult>();
+  const [savedConnections, setSavedConnections] = useState<SavedConnection[]>([]);
+  const [storageMode, setStorageMode] = useState<"durable" | "ephemeral">("durable");
+  const [savedId, setSavedId] = useState("");
+  const [savedName, setSavedName] = useState("");
+  const [savedSecurityPolicy, setSavedSecurityPolicy] = useState("None");
+  const [savedSecurityMode, setSavedSecurityMode] = useState<"None" | "Sign" | "SignAndEncrypt">("None");
+  const [savedUsername, setSavedUsername] = useState("");
+  const [savedPin, setSavedPin] = useState("");
+  const [savedPassword, setSavedPassword] = useState("");
   const [diagnostics, setDiagnostics] = useState<DiagnosticReport>([]);
   const [browseNodeId, setBrowseNodeId] = useState("i=84");
   const [searchQuery, setSearchQuery] = useState("");
@@ -68,9 +78,15 @@ export function App() {
       }, 5_000);
     };
     const refreshSnapshot = async (): Promise<Snapshot> => {
-      const [current, report] = await Promise.all([api.getSnapshot(), api.getDiagnosticReport()]);
+      const [current, report, saved] = await Promise.all([
+        api.getSnapshot(),
+        api.getDiagnosticReport(),
+        api.listSavedConnections(),
+      ]);
       if (!stopped) {
         setDiagnostics(report);
+        setSavedConnections(saved.savedConnections);
+        setStorageMode(saved.mode);
         setSnapshot(current);
         controllerGeneration = current.controller.controllerGeneration;
         if (current.controller.role === "controller") startRenewal();
@@ -182,6 +198,71 @@ export function App() {
     }, "The OPC UA Server connection failed.");
   }
 
+  function editSaved(connection: SavedConnection): void {
+    setSavedId(connection.id);
+    setSavedName(connection.name);
+    setEndpointUrl(connection.endpoint);
+    setSavedSecurityPolicy(connection.securityPolicy);
+    setSavedSecurityMode(connection.securityMode);
+    setSavedUsername(connection.username ?? "");
+    setSavedPin(connection.serverCertificatePin ?? "");
+    setSavedPassword("");
+  }
+
+  function newSaved(): void {
+    setSavedId("");
+    setSavedName("");
+    setSavedSecurityPolicy("None");
+    setSavedSecurityMode("None");
+    setSavedUsername("");
+    setSavedPin("");
+    setSavedPassword("");
+  }
+
+  async function saveSaved(): Promise<void> {
+    await withWorking(async () => {
+      const id = savedId || crypto.randomUUID();
+      await api.saveSavedConnection(
+        id,
+        {
+          name: savedName,
+          endpoint: endpointUrl,
+          securityPolicy: savedSecurityPolicy,
+          securityMode: savedSecurityMode,
+          ...(savedUsername ? { username: savedUsername } : {}),
+          ...(savedPin ? { serverCertificatePin: savedPin } : {}),
+        },
+        snapshot!.controller.controllerGeneration,
+      );
+      setSavedPassword("");
+      const saved = await api.listSavedConnections();
+      setSavedConnections(saved.savedConnections);
+      setStorageMode(saved.mode);
+      setSavedId(id);
+    }, "The Saved Connection could not be saved.");
+  }
+
+  async function deleteSaved(id: string): Promise<void> {
+    if (!window.confirm("Delete this Saved Connection?")) return;
+    await withWorking(async () => {
+      await api.deleteSavedConnection(id, snapshot!.controller.controllerGeneration);
+      setSavedConnections((current) => current.filter((connection) => connection.id !== id));
+      if (savedId === id) newSaved();
+    }, "The Saved Connection could not be deleted.");
+  }
+
+  async function connectSaved(connection: SavedConnection): Promise<void> {
+    await withWorking(async () => {
+      const current = await api.connectSavedConnection(
+        connection.id,
+        savedPassword ? { userSecret: savedPassword } : {},
+        snapshot!.controller.controllerGeneration,
+      );
+      setSnapshot(current);
+      setSavedPassword("");
+    }, "The Saved Connection could not be connected.");
+  }
+
   async function disconnect(): Promise<void> {
     await withWorking(async () => {
       const current = await api.disconnectOpcUa(snapshot!.controller.controllerGeneration);
@@ -261,6 +342,84 @@ export function App() {
               SecurityPolicy None: OPC UA Server identity is unverified.
             </p>
           )}
+          {storageMode === "ephemeral" && (
+            <p className="warning" role="alert">
+              Ephemeral mode is enabled. Saved Connections will be lost when the server stops.
+            </p>
+          )}
+          {controllerRole === "controller" && (
+            <section aria-labelledby="saved-connections-heading">
+              <h3 id="saved-connections-heading">Saved Connections</h3>
+              {savedConnections.length > 0 && (
+                <ul aria-label="Saved Connections">
+                  {savedConnections.map((connection) => (
+                    <li key={connection.id}>
+                      <span>
+                        {connection.name} · {connection.endpoint}
+                      </span>{" "}
+                      <button type="button" onClick={() => void connectSaved(connection)} disabled={working}>
+                        Reconnect
+                      </button>{" "}
+                      <button type="button" onClick={() => editSaved(connection)} disabled={working}>
+                        Edit
+                      </button>{" "}
+                      <button type="button" onClick={() => void deleteSaved(connection.id)} disabled={working}>
+                        Delete
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <label>
+                Saved Connection name
+                <input value={savedName} onChange={(event) => setSavedName(event.target.value)} />
+              </label>
+              <label>
+                Security policy
+                <input value={savedSecurityPolicy} onChange={(event) => setSavedSecurityPolicy(event.target.value)} />
+              </label>
+              <label>
+                Security mode
+                <select
+                  value={savedSecurityMode}
+                  onChange={(event) => setSavedSecurityMode(event.target.value as typeof savedSecurityMode)}
+                >
+                  <option value="None">None</option>
+                  <option value="Sign">Sign</option>
+                  <option value="SignAndEncrypt">Sign and Encrypt</option>
+                </select>
+              </label>
+              <label>
+                Server certificate SHA-256 pin (required for secure connections)
+                <input value={savedPin} onChange={(event) => setSavedPin(event.target.value)} />
+              </label>
+              <label>
+                Username (optional)
+                <input
+                  value={savedUsername}
+                  onChange={(event) => setSavedUsername(event.target.value)}
+                  autoComplete="off"
+                />
+              </label>
+              <label>
+                Password (never saved)
+                <input
+                  type="password"
+                  value={savedPassword}
+                  onChange={(event) => setSavedPassword(event.target.value)}
+                  autoComplete="new-password"
+                />
+              </label>
+              <div className="actions">
+                <button type="button" onClick={() => void saveSaved()} disabled={working || !savedName || !endpointUrl}>
+                  Save Saved Connection
+                </button>
+                <button type="button" onClick={newSaved} disabled={working}>
+                  New
+                </button>
+              </div>
+            </section>
+          )}
           {controllerRole === "controller" && (
             <section aria-labelledby="connection-heading">
               <h3 id="connection-heading">OPC UA Server connection</h3>
@@ -291,7 +450,15 @@ export function App() {
                 <ul>
                   {discovery.endpoints.map((endpoint) => (
                     <li key={`${endpoint.endpointUrl}-${endpoint.securityMode}-${endpoint.securityPolicyUri}`}>
-                      <button type="button" onClick={() => setEndpointUrl(endpoint.endpointUrl)}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEndpointUrl(endpoint.endpointUrl);
+                          setSavedSecurityMode(endpoint.securityMode);
+                          setSavedSecurityPolicy(endpoint.securityPolicyUri);
+                          setSavedPin(endpoint.serverCertificateFingerprint ?? "");
+                        }}
+                      >
                         {endpoint.securityMode} · {endpoint.securityPolicyUri}
                       </button>
                     </li>

@@ -14,6 +14,9 @@ import {
   type EventEnvelope,
   type SearchResult,
   type Snapshot,
+  type SavedConnectionConnectRequest,
+  type SavedConnectionList,
+  type SavedConnectionRequest,
 } from "@ostudio/contracts";
 import { createAuthenticator, authConstants, type AuthSession } from "./auth.js";
 
@@ -35,6 +38,10 @@ export interface RuntimeShutdownHooks {
   connect?(request: EndpointDiscoveryRequest): Promise<void>;
   browse?(request: BrowseRequest): Promise<BrowseResult>;
   search?(request: { query: string }): Promise<SearchResult>;
+  listSavedConnections?(): Promise<SavedConnectionList>;
+  saveSavedConnection?(id: string, request: SavedConnectionRequest): Promise<void>;
+  deleteSavedConnection?(id: string): Promise<void>;
+  connectSavedConnection?(id: string, request: SavedConnectionConnectRequest): Promise<void>;
   setReadOnly?(readOnly: true): Promise<void> | void;
   disconnect?(): Promise<void>;
   close?(): Promise<void>;
@@ -504,7 +511,8 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       ["/api/v1/build", "/api/v1/snapshot", "/api/v1/events", "/api/v1/diagnostics"].includes(pathname) ||
       pathname.startsWith("/api/v1/controller/") ||
       pathname.startsWith("/api/v1/opcua/") ||
-      pathname.startsWith("/api/v1/address-space/");
+      pathname.startsWith("/api/v1/address-space/") ||
+      pathname.startsWith("/api/v1/saved-connections");
     if (isLogin && !sameOrigin(request, config)) {
       void reply.code(403).send(errorBody("origin_rejected", "The request origin is not allowed."));
       return;
@@ -759,12 +767,111 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     }
     return { endpointUrl: body.endpointUrl };
   };
+  const savedConnectionId = (request: FastifyRequest): string | undefined => {
+    const id = (request.params as { id?: unknown } | undefined)?.id;
+    return typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id) ? id : undefined;
+  };
+  const savedConnectionRequest = (request: FastifyRequest): SavedConnectionRequest | undefined => {
+    const body = requestBody<Partial<SavedConnectionRequest>>(request);
+    if (
+      !body ||
+      typeof body.name !== "string" ||
+      body.name.length < 1 ||
+      body.name.length > 256 ||
+      typeof body.endpoint !== "string" ||
+      body.endpoint.length < 1 ||
+      body.endpoint.length > 2048 ||
+      typeof body.securityPolicy !== "string" ||
+      body.securityPolicy.length < 1 ||
+      body.securityPolicy.length > 256 ||
+      !["None", "Sign", "SignAndEncrypt"].includes(body.securityMode ?? "")
+    )
+      return undefined;
+    try {
+      const endpoint = new URL(body.endpoint);
+      if (endpoint.protocol !== "opc.tcp:" || endpoint.username || endpoint.password) return undefined;
+    } catch {
+      return undefined;
+    }
+    if (body.username !== undefined && (typeof body.username !== "string" || body.username.length > 256))
+      return undefined;
+    if (
+      body.serverCertificatePin !== undefined &&
+      (typeof body.serverCertificatePin !== "string" || body.serverCertificatePin.length > 512)
+    )
+      return undefined;
+    if (body.certificateReviewRequired !== undefined && typeof body.certificateReviewRequired !== "boolean")
+      return undefined;
+    return body as SavedConnectionRequest;
+  };
+  const savedConnectionConnectRequest = (request: FastifyRequest): SavedConnectionConnectRequest => {
+    const body = requestBody<{ userSecret?: unknown; password?: unknown }>(request);
+    const secret = body?.userSecret ?? body?.password;
+    return secret === undefined
+      ? {}
+      : typeof secret === "string" && secret.length <= 1024
+        ? { userSecret: secret }
+        : (() => {
+            throw new Error("invalid user secret");
+          })();
+  };
   const runtimeError = (
     reply: FastifyReply,
     code: "discovery_failed" | "connection_failed" | "operation_failed",
   ): void => {
     void reply.code(502).send(errorBody(code, "The OPC UA operation could not be completed."));
   };
+  server.get(
+    "/api/v1/saved-connections",
+    async () => (await options.runtime?.listSavedConnections?.()) ?? { mode: "ephemeral", savedConnections: [] },
+  );
+  server.put("/api/v1/saved-connections/:id", async (request, reply) =>
+    controllerCommand(request, reply, async () => {
+      const id = savedConnectionId(request);
+      const body = savedConnectionRequest(request);
+      if (!id || !body) return void reply.code(400).send(errorBody("bad_request", "The Saved Connection is invalid."));
+      if (!options.runtime?.saveSavedConnection) return runtimeError(reply, "operation_failed");
+      try {
+        await options.runtime.saveSavedConnection(id, body);
+        return reply.code(204).send();
+      } catch {
+        return runtimeError(reply, "operation_failed");
+      }
+    }),
+  );
+  server.delete("/api/v1/saved-connections/:id/delete", async (request, reply) =>
+    controllerCommand(request, reply, async () => {
+      const id = savedConnectionId(request);
+      if (!id) return void reply.code(400).send(errorBody("bad_request", "The Saved Connection ID is invalid."));
+      if (!options.runtime?.deleteSavedConnection) return runtimeError(reply, "operation_failed");
+      try {
+        await options.runtime.deleteSavedConnection(id);
+        return reply.code(204).send();
+      } catch {
+        return runtimeError(reply, "operation_failed");
+      }
+    }),
+  );
+  server.post("/api/v1/saved-connections/:id/connect", async (request, reply) =>
+    controllerCommand(
+      request,
+      reply,
+      async () => {
+        const id = savedConnectionId(request);
+        if (!id) return void reply.code(400).send(errorBody("bad_request", "The Saved Connection ID is invalid."));
+        if (!options.runtime?.connectSavedConnection) return runtimeError(reply, "connection_failed");
+        let body: SavedConnectionConnectRequest;
+        try {
+          body = savedConnectionConnectRequest(request);
+          await options.runtime.connectSavedConnection(id, body);
+          return currentSnapshot(request);
+        } catch {
+          return runtimeError(reply, "connection_failed");
+        }
+      },
+      true,
+    ),
+  );
   server.post("/api/v1/opcua/discover", async (request, reply) =>
     controllerCommand(request, reply, async () => {
       const body = endpointRequest(request);

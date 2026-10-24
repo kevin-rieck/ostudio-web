@@ -10,12 +10,14 @@ import {
   type OpcUaDataValue,
   type OpcUaReadRequest,
   type OpcUaSession,
+  type SavedConnection,
   type SavedConnectionStore,
 } from "./index.js";
 
 const store: SavedConnectionStore = {
   list: async () => [],
   save: async () => undefined,
+  remove: async () => undefined,
 };
 
 function client(): OpcUaClient {
@@ -205,6 +207,7 @@ describe("application facade", () => {
         save: async (value) => {
           saved.push(value);
         },
+        remove: async () => undefined,
       },
       clock: { now: () => new Date("2026-01-01T00:00:00.000Z") },
       events: { publish: () => undefined },
@@ -232,6 +235,35 @@ describe("application facade", () => {
     expect(saved[0]).not.toHaveProperty("clientCertificateReference");
   });
 
+  it("CRUD does not alter an active OPC UA session", async () => {
+    const records = new Map<string, SavedConnection>();
+    const application = createApplication({
+      clientFactory: client,
+      savedConnections: {
+        list: async () => [...records.values()],
+        save: async (connection) => {
+          records.set(connection.id, connection);
+        },
+        remove: async (id) => {
+          records.delete(id);
+        },
+      },
+      clock: { now: () => new Date("2026-01-01T00:00:00.000Z") },
+      events: { publish: () => undefined },
+    });
+    await application.connect({ endpointUrl: "opc.tcp://plc:4840" });
+    await application.saveSavedConnection({
+      id: "plc",
+      name: "PLC",
+      endpoint: "opc.tcp://plc:4840",
+      securityPolicy: "None",
+      securityMode: "None",
+    });
+    await application.removeSavedConnection("plc");
+    expect(application.snapshot().connection.state).toBe("connected");
+    expect(await application.listSavedConnections()).toEqual([]);
+  });
+
   it("redacts endpoint userinfo from connection state and Saved Connections", async () => {
     const events: ApplicationEvent[] = [];
     const saved: unknown[] = [];
@@ -256,6 +288,7 @@ describe("application facade", () => {
         save: async (connection) => {
           saved.push(connection);
         },
+        remove: async () => undefined,
       },
       clock: { now: () => new Date("2026-01-01T00:00:00.000Z") },
       events: { publish: (event) => events.push(event) },

@@ -278,12 +278,13 @@ export interface SavedConnection {
   username?: string;
   clientCertificateReference?: string;
   serverCertificatePin?: string;
+  certificateReviewRequired?: boolean;
 }
 
 export interface SavedConnectionStore {
   list(): Promise<SavedConnection[]>;
   save(connection: SavedConnection): Promise<void>;
-  remove?(id: string): Promise<void>;
+  remove(id: string): Promise<void>;
 }
 
 export interface ApplicationConfig {
@@ -500,6 +501,7 @@ function safeConnection(connection: SavedConnection, logger?: Logger): SavedConn
     ...(connection.username === undefined ? {} : { username: connection.username }),
     ...(safeReference === undefined ? {} : { clientCertificateReference: safeReference }),
     ...(connection.serverCertificatePin === undefined ? {} : { serverCertificatePin: connection.serverCertificatePin }),
+    ...(connection.certificateReviewRequired === true ? { certificateReviewRequired: true } : {}),
   };
 }
 
@@ -847,7 +849,7 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
       (await dependencies.savedConnections.list()).map((connection) => safeConnection(connection, dependencies.logger)),
     saveSavedConnection: async (connection) =>
       dependencies.savedConnections.save(safeConnection(connection, dependencies.logger)),
-    removeSavedConnection: async (id) => dependencies.savedConnections.remove?.(id),
+    removeSavedConnection: (id) => dependencies.savedConnections.remove(id),
     discover: (request) => client.discover(request),
     connect: (request) =>
       serialized(async () => {

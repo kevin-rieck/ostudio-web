@@ -113,6 +113,77 @@ describe("server routes", () => {
     ).toBe(200);
   });
 
+  it("manages Saved Connections through authenticated controller routes", async () => {
+    const calls: string[] = [];
+    server = await createServer({
+      env: developmentEnvironment,
+      runtime: {
+        listSavedConnections: async () => ({ mode: "durable", savedConnections: [] }),
+        saveSavedConnection: async (id) => {
+          calls.push(`save:${id}`);
+        },
+        deleteSavedConnection: async (id) => {
+          calls.push(`delete:${id}`);
+        },
+        connectSavedConnection: async (id, request) => {
+          calls.push(`connect:${id}:${request.userSecret ?? ""}`);
+        },
+      },
+    });
+    const login = await server.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { origin: "http://localhost:8080" },
+      payload: { username: "admin", password: "correct horse battery staple" },
+    });
+    const cookie = String(login.headers["set-cookie"]);
+    expect((await server.inject({ method: "GET", url: "/api/v1/saved-connections" })).statusCode).toBe(401);
+    expect(
+      (await server.inject({ method: "GET", url: "/api/v1/saved-connections", headers: { cookie } })).json(),
+    ).toEqual({ mode: "durable", savedConnections: [] });
+    await server.inject({
+      method: "POST",
+      url: "/api/v1/controller/attach",
+      headers: { origin: "http://localhost:8080", cookie },
+    });
+    const headers = { origin: "http://localhost:8080", cookie };
+    expect(
+      (
+        await server.inject({
+          method: "PUT",
+          url: "/api/v1/saved-connections/plc?controllerGeneration=1",
+          headers,
+          payload: {
+            name: "PLC",
+            endpoint: "opc.tcp://plc:4840",
+            securityPolicy: "None",
+            securityMode: "None",
+          },
+        })
+      ).statusCode,
+    ).toBe(204);
+    expect(
+      (
+        await server.inject({
+          method: "POST",
+          url: "/api/v1/saved-connections/plc/connect?controllerGeneration=1",
+          headers,
+          payload: { userSecret: "transient" },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await server.inject({
+          method: "DELETE",
+          url: "/api/v1/saved-connections/plc/delete?controllerGeneration=1",
+          headers,
+        })
+      ).statusCode,
+    ).toBe(204);
+    expect(calls).toEqual(["save:plc", "connect:plc:transient", "delete:plc"]);
+  });
+
   it("uses one generic failed-login response and rejects cross-origin state changes", async () => {
     server = await createServer({
       env: {

@@ -9,6 +9,7 @@ import type {
   Snapshot,
 } from "@ostudio/contracts";
 import { createServer, type WebServer } from "./server.js";
+import { createFileSavedConnectionStore, createMemorySavedConnectionStore } from "./saved-connections.js";
 
 function snapshotForTransport(source: ApplicationSnapshot): Snapshot {
   const nodeMap = new Map<string, AddressSpaceNode>();
@@ -51,6 +52,10 @@ function snapshotForTransport(source: ApplicationSnapshot): Snapshot {
 
 export async function start(): Promise<void> {
   const serverRef: { current?: WebServer } = {};
+  const savedConnections =
+    process.env.OSTUDIO_EPHEMERAL === "true"
+      ? createMemorySavedConnectionStore()
+      : await createFileSavedConnectionStore(process.env.OSTUDIO_DATA_DIRECTORY ?? "/data");
   const application: ApplicationFacade = createApplication({
     clock: { now: () => new Date() },
     events: {
@@ -63,7 +68,7 @@ export async function start(): Promise<void> {
       },
     },
     clientFactory: (options) => createNodeOpcuaAdapter(options),
-    savedConnections: { list: async () => [], save: async () => undefined },
+    savedConnections,
   });
   const runtime = {
     snapshot: (): Snapshot => snapshotForTransport(application.snapshot()),
@@ -74,6 +79,43 @@ export async function start(): Promise<void> {
         securityMode: "None",
         userIdentity: { type: "anonymous" },
       }),
+    listSavedConnections: async () => ({
+      mode: savedConnections.mode,
+      savedConnections: await application.listSavedConnections(),
+    }),
+    saveSavedConnection: async (
+      id: string,
+      request: {
+        name: string;
+        endpoint: string;
+        securityPolicy: string;
+        securityMode: "None" | "Sign" | "SignAndEncrypt";
+        username?: string;
+        serverCertificatePin?: string;
+        certificateReviewRequired?: boolean;
+      },
+    ) => {
+      await application.saveSavedConnection({ id, ...request });
+    },
+    deleteSavedConnection: (id: string): Promise<void> => application.removeSavedConnection(id),
+    connectSavedConnection: async (id: string, request: { userSecret?: string }): Promise<void> => {
+      const saved = (await application.listSavedConnections()).find((connection) => connection.id === id);
+      if (!saved) throw new Error("Saved Connection not found.");
+      if (saved.certificateReviewRequired) throw new Error("Saved Connection certificate requires review.");
+      if (saved.username !== undefined && request.userSecret === undefined)
+        throw new Error("A user secret is required for this Saved Connection.");
+      await application.connect({
+        endpointUrl: saved.endpoint,
+        securityPolicyUri: saved.securityPolicy.startsWith("http://opcfoundation.org/UA/SecurityPolicy#")
+          ? saved.securityPolicy
+          : `http://opcfoundation.org/UA/SecurityPolicy#${saved.securityPolicy}`,
+        securityMode: saved.securityMode,
+        ...(saved.serverCertificatePin ? { serverCertificateFingerprint: saved.serverCertificatePin } : {}),
+        ...(saved.username === undefined
+          ? { userIdentity: { type: "anonymous" as const } }
+          : { userIdentity: { type: "username" as const, username: saved.username, password: request.userSecret! } }),
+      });
+    },
     browse: (request: { nodeId: string }): Promise<BrowseResult> => application.browse(request),
     search: (request: { query: string }): Promise<SearchResult> => application.search(request.query),
     setReadOnly: (readOnly: true): Promise<void> => application.setReadOnly(readOnly),

@@ -24,6 +24,36 @@ export interface EndpointDiscoveryRequest {
   endpointUrl: string;
 }
 
+export interface SavedConnection {
+  id: string;
+  name: string;
+  endpoint: string;
+  securityPolicy: string;
+  securityMode: "None" | "Sign" | "SignAndEncrypt";
+  username?: string;
+  serverCertificatePin?: string;
+  certificateReviewRequired?: boolean;
+}
+
+export interface SavedConnectionRequest {
+  name: string;
+  endpoint: string;
+  securityPolicy: string;
+  securityMode: "None" | "Sign" | "SignAndEncrypt";
+  username?: string;
+  serverCertificatePin?: string;
+  certificateReviewRequired?: boolean;
+}
+
+export interface SavedConnectionConnectRequest {
+  userSecret?: string;
+}
+
+export interface SavedConnectionList {
+  mode: "durable" | "ephemeral";
+  savedConnections: SavedConnection[];
+}
+
 export interface EndpointDiscoveryResult {
   servers: ServerDescription[];
   endpoints: DiscoveredEndpoint[];
@@ -316,6 +346,10 @@ export interface ApiClient {
   browseAddressSpace(request: BrowseRequest, controllerGeneration: number): Promise<BrowseResult>;
   searchAddressSpace(request: SearchRequest, controllerGeneration: number): Promise<SearchResult>;
   getDiagnosticReport(): Promise<DiagnosticReport>;
+  listSavedConnections(): Promise<SavedConnectionList>;
+  saveSavedConnection(id: string, request: SavedConnectionRequest, controllerGeneration: number): Promise<void>;
+  deleteSavedConnection(id: string, controllerGeneration: number): Promise<void>;
+  connectSavedConnection(id: string, request: SavedConnectionConnectRequest, controllerGeneration: number): Promise<Snapshot>;
   attachController(): Promise<ControllerState>;
   recoverController(): Promise<ControllerState>;
   takeOverController(): Promise<ControllerState>;
@@ -403,6 +437,22 @@ export function createApiClient(transport: ContractTransport = defaultTransport,
 
   getDiagnosticReport(): Promise<DiagnosticReport> {
     return send<DiagnosticReport>("GET", "/api/v1/diagnostics");
+  },
+
+  listSavedConnections(): Promise<SavedConnectionList> {
+    return send<SavedConnectionList>("GET", "/api/v1/saved-connections");
+  },
+
+  saveSavedConnection(id: string, request: SavedConnectionRequest, controllerGeneration: number): Promise<void> {
+    return send<void>("PUT", "/api/v1/saved-connections/{id}".replace("{id}", encodeURIComponent(String(id))) + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)), JSON.stringify(request));
+  },
+
+  deleteSavedConnection(id: string, controllerGeneration: number): Promise<void> {
+    return send<void>("DELETE", "/api/v1/saved-connections/{id}/delete".replace("{id}", encodeURIComponent(String(id))) + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)));
+  },
+
+  connectSavedConnection(id: string, request: SavedConnectionConnectRequest, controllerGeneration: number): Promise<Snapshot> {
+    return send<Snapshot>("POST", "/api/v1/saved-connections/{id}/connect".replace("{id}", encodeURIComponent(String(id))) + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)), JSON.stringify(request));
   },
 
   attachController(): Promise<ControllerState> {

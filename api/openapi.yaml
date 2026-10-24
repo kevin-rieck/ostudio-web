@@ -233,6 +233,78 @@
         }
       }
     },
+    "/api/v1/saved-connections": {
+      "get": {
+        "operationId": "listSavedConnections",
+        "security": [{ "sessionCookie": [] }],
+        "responses": {
+          "200": {
+            "description": "Saved Connection records and storage mode; secrets are never returned.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SavedConnectionList" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/saved-connections/{id}": {
+      "put": {
+        "operationId": "saveSavedConnection",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 128 } },
+          { "name": "controllerGeneration", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 } }
+        ],
+        "security": [{ "sessionCookie": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SavedConnectionRequest" } } }
+        },
+        "responses": {
+          "204": { "description": "The Saved Connection was created or replaced." },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/ControllerUnavailable" }
+        }
+      }
+    },
+    "/api/v1/saved-connections/{id}/delete": {
+      "delete": {
+        "operationId": "deleteSavedConnection",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 128 } },
+          { "name": "controllerGeneration", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 } }
+        ],
+        "security": [{ "sessionCookie": [] }],
+        "responses": {
+          "204": { "description": "The Saved Connection was deleted." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/ControllerUnavailable" }
+        }
+      }
+    },
+    "/api/v1/saved-connections/{id}/connect": {
+      "post": {
+        "operationId": "connectSavedConnection",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 128 } },
+          { "name": "controllerGeneration", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 } }
+        ],
+        "security": [{ "sessionCookie": [] }],
+        "requestBody": {
+          "required": false,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SavedConnectionConnectRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "The Saved Connection was connected in Read-Only Mode.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Snapshot" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/BadRequest" },
+          "409": { "$ref": "#/components/responses/ControllerUnavailable" },
+          "502": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
     "/api/v1/controller/attach": {
       "post": {
         "operationId": "attachController",
@@ -437,6 +509,49 @@
         "additionalProperties": false,
         "required": ["endpointUrl"],
         "properties": { "endpointUrl": { "type": "string", "minLength": 1, "maxLength": 2048 } }
+      },
+      "SavedConnection": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "endpoint", "securityPolicy", "securityMode"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "endpoint": { "type": "string", "minLength": 1, "maxLength": 2048 },
+          "securityPolicy": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "securityMode": { "type": "string", "enum": ["None", "Sign", "SignAndEncrypt"] },
+          "username": { "type": "string", "maxLength": 256 },
+          "serverCertificatePin": { "type": "string", "maxLength": 512 },
+          "certificateReviewRequired": { "type": "boolean" }
+        }
+      },
+      "SavedConnectionRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "endpoint", "securityPolicy", "securityMode"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "endpoint": { "type": "string", "minLength": 1, "maxLength": 2048 },
+          "securityPolicy": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "securityMode": { "type": "string", "enum": ["None", "Sign", "SignAndEncrypt"] },
+          "username": { "type": "string", "maxLength": 256 },
+          "serverCertificatePin": { "type": "string", "maxLength": 512 },
+          "certificateReviewRequired": { "type": "boolean" }
+        }
+      },
+      "SavedConnectionConnectRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": { "userSecret": { "type": "string", "maxLength": 1024 } }
+      },
+      "SavedConnectionList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["mode", "savedConnections"],
+        "properties": {
+          "mode": { "type": "string", "enum": ["durable", "ephemeral"] },
+          "savedConnections": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/SavedConnection" } }
+        }
       },
       "EndpointDiscoveryResult": {
         "type": "object",
