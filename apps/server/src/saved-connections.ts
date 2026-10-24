@@ -171,7 +171,7 @@ async function atomicWrite(filePath: string, contents: string): Promise<void> {
   }
 }
 
-async function readDocument(filePath: string): Promise<{ envelope: Envelope; legacy: boolean; source: string }> {
+async function readDocument(filePath: string): Promise<{ envelope: Envelope; legacy: boolean }> {
   const source = await readFile(filePath, "utf8");
   let parsed: unknown;
   try {
@@ -179,8 +179,8 @@ async function readDocument(filePath: string): Promise<{ envelope: Envelope; leg
   } catch (error) {
     throw new Error("Saved Connection storage is corrupt.", { cause: error });
   }
-  if (Array.isArray(parsed)) return { envelope: migrateLegacy(parsed), legacy: true, source };
-  return { envelope: parseEnvelope(parsed), legacy: false, source };
+  if (Array.isArray(parsed)) return { envelope: migrateLegacy(parsed), legacy: true };
+  return { envelope: parseEnvelope(parsed), legacy: false };
 }
 
 export function createMemorySavedConnectionStore(): SavedConnectionStoreAdapter {
@@ -207,8 +207,10 @@ export async function createFileSavedConnectionStore(directory: string): Promise
     const document = await readDocument(filePath);
     envelope = document.envelope;
     if (document.legacy) {
-      await atomicWrite(`${filePath}.bak`, document.source);
-      await atomicWrite(filePath, JSON.stringify(envelope));
+      // Back up only the sanitized projection; legacy source may contain OPC UA passwords.
+      const sanitized = JSON.stringify(envelope);
+      await atomicWrite(`${filePath}.bak`, sanitized);
+      await atomicWrite(filePath, sanitized);
     }
     await chmod(filePath, 0o600);
   } catch (error) {

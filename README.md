@@ -57,7 +57,7 @@ npm run build
 
 ## Saved Connection storage
 
-Durable Saved Connections are owned by the web process under `/data/saved-connections.json` (with restrictive permissions). Legacy desktop JSON is imported with a `.bak` backup before conversion; corrupt or unsupported data prevents startup. Stop the desktop application before importing and do not run desktop and web processes as concurrent writers of the same file. Set `OSTUDIO_EPHEMERAL=true` only when loss on restart is acceptable.
+Durable Saved Connections are owned by the web process under `/data/saved-connections.json` (with restrictive permissions). Legacy desktop JSON is imported with a sanitized, versioned `.bak` backup before replacement; the backup is not a byte-for-byte copy because legacy records may contain passwords. Securely remove any pre-existing raw legacy copies or backups separately; corrupt or unsupported data prevents startup. Stop the desktop application before importing and do not run desktop and web processes as concurrent writers of the same file. Set `OSTUDIO_EPHEMERAL=true` only when loss on restart is acceptable.
 
 ## Security posture
 

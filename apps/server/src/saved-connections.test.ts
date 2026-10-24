@@ -74,10 +74,15 @@ describe("saved connection storage", () => {
         certificateReviewRequired: true,
       },
     ]);
-    expect(await readFile(`${file}.bak`, "utf8")).toBe(original);
-    expect(JSON.parse(await readFile(file, "utf8"))).toMatchObject({ version: 1 });
-    expect(await readFile(file, "utf8")).not.toContain("secret");
-    expect(await readFile(file, "utf8")).not.toContain("private.key");
+    const backup = await readFile(`${file}.bak`, "utf8");
+    const migrated = await readFile(file, "utf8");
+    expect(backup).toBe(migrated);
+    expect(JSON.parse(backup)).toMatchObject({ version: 1 });
+    for (const contents of [backup, migrated]) {
+      expect(contents).not.toContain("secret");
+      expect(contents).not.toContain("private.key");
+    }
+    await expect(createFileSavedConnectionStore(directory)).resolves.toBeDefined();
   });
 
   it("rejects a 101st record without rendering durable storage unreadable", async () => {
