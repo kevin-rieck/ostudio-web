@@ -26,6 +26,7 @@ export type LoginResult = { ok: true; token: string; session: AuthSession } | { 
 export interface Authenticator {
   login(username: string, password: string, source: string): Promise<LoginResult>;
   session(token: string | undefined): AuthSession | undefined;
+  valid(token: string | undefined): boolean;
   logout(token: string | undefined): void;
   cookie(token: string): string;
 }
@@ -125,6 +126,10 @@ export async function createAuthenticator(options: AuthenticatorOptions): Promis
       }
       current.lastActivityAt = timestamp;
       return current;
+    },
+    valid(token) {
+      const current = token && sessions.get(token);
+      return Boolean(current && now() < current.expiresAt && now() - current.lastActivityAt < INACTIVITY_MS);
     },
     logout(token) {
       if (token) sessions.delete(token);
