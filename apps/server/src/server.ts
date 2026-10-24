@@ -14,6 +14,9 @@ import {
   type EventEnvelope,
   type SearchResult,
   type Snapshot,
+  type SavedConnectionConnectRequest,
+  type SavedConnectionList,
+  type SavedConnectionRequest,
 } from "@ostudio/contracts";
 import { createAuthenticator, authConstants, type AuthSession } from "./auth.js";
 
@@ -22,12 +25,17 @@ const DEFAULT_CONTROLLER_LEASE_MS = 15_000;
 const DEFAULT_CONTROLLER_DISCONNECT_GRACE_MS = 5 * 60_000;
 const SSE_QUEUE_LIMIT = 100;
 const SSE_HEARTBEAT_MS = 15_000;
+const SHA256_PIN = /^sha256:[0-9a-f]{64}$/;
 type EventType = EventEnvelope["type"];
 type Environment = NodeJS.ProcessEnv;
 export interface TimerScheduler {
   setTimeout(callback: () => void, milliseconds: number): unknown;
   clearTimeout(handle: unknown): void;
+  setInterval?(callback: () => void, milliseconds: number): unknown;
+  clearInterval?(handle: unknown): void;
 }
+
+export type SavedConnectionConnectResult = { outcome: "not_found" };
 
 export interface RuntimeShutdownHooks {
   snapshot?(): Snapshot;
@@ -35,6 +43,13 @@ export interface RuntimeShutdownHooks {
   connect?(request: EndpointDiscoveryRequest): Promise<void>;
   browse?(request: BrowseRequest): Promise<BrowseResult>;
   search?(request: { query: string }): Promise<SearchResult>;
+  listSavedConnections?(): Promise<SavedConnectionList>;
+  saveSavedConnection?(id: string, request: SavedConnectionRequest): Promise<void>;
+  deleteSavedConnection?(id: string): Promise<void>;
+  connectSavedConnection?(
+    id: string,
+    request: SavedConnectionConnectRequest,
+  ): Promise<void | SavedConnectionConnectResult>;
   setReadOnly?(readOnly: true): Promise<void> | void;
   disconnect?(): Promise<void>;
   close?(): Promise<void>;
@@ -259,6 +274,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   if (!Number.isSafeInteger(controllerDisconnectGraceMilliseconds) || controllerDisconnectGraceMilliseconds <= 0)
     throw new Error("controllerDisconnectGraceMilliseconds must be a positive integer.");
   let controllerOwner: string | undefined;
+  let controllerSession: AuthSession | undefined;
   let recoverableControllerSessionId: string | undefined;
   let controllerGeneration = 0;
   const diagnostics: ConnectionDiagnostic[] = [];
@@ -301,11 +317,12 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   };
 
   type EventClient = {
+    sessionId: string;
     response: import("node:http").ServerResponse;
     queue: EventEnvelope[];
     paused: boolean;
     closed: boolean;
-    heartbeat: NodeJS.Timeout;
+    heartbeat: unknown;
   };
   const eventClients = new Set<EventClient>();
   const eventHistory: EventEnvelope[] = [];
@@ -315,11 +332,19 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     if (client.closed) return;
     client.closed = true;
     eventClients.delete(client);
-    clearInterval(client.heartbeat);
+    if (timers.clearInterval) timers.clearInterval(client.heartbeat);
+    else clearInterval(client.heartbeat as NodeJS.Timeout);
     client.response.end();
+  };
+  const expireEventClient = (client: EventClient): boolean => {
+    if (authenticator.valid(client.sessionId)) return false;
+    if (client.sessionId === controllerOwner) void revokeExpiredController();
+    closeEventClient(client);
+    return true;
   };
   const flushEventClient = (client: EventClient): void => {
     if (client.closed) return;
+    if (expireEventClient(client)) return;
     client.paused = false;
     while (client.queue.length > 0 && !client.paused && !client.closed) {
       const event = client.queue.shift()!;
@@ -332,6 +357,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   };
   const sendEvent = (client: EventClient, event: EventEnvelope): void => {
     if (client.closed) return;
+    if (expireEventClient(client)) return;
     if (client.paused) {
       if (event.type === "live-value-changed") {
         const nodeId = "nodeId" in event.payload ? event.payload.nodeId : undefined;
@@ -373,6 +399,11 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     if (disconnectGraceTimer !== undefined) timers.clearTimeout(disconnectGraceTimer);
     disconnectGraceTimer = undefined;
   };
+  const revalidateControllerSession = (session: AuthSession, reply: FastifyReply): boolean => {
+    if (authenticator.valid(session.id)) return true;
+    unauthorized(reply);
+    return false;
+  };
   const restoreReadOnly = (): Promise<void> => Promise.resolve(options.runtime?.setReadOnly?.(true));
   const disconnectRuntime = async (message: string, bounded = false): Promise<void> => {
     const disconnect = options.runtime?.disconnect ?? options.runtime?.close;
@@ -401,6 +432,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     if (controllerOwner === undefined) return;
     recoverableControllerSessionId = controllerOwner;
     controllerOwner = undefined;
+    controllerSession = undefined;
     controllerLeaseExpiresAt = undefined;
     if (controllerExpiryTimer !== undefined) timers.clearTimeout(controllerExpiryTimer);
     controllerExpiryTimer = undefined;
@@ -416,10 +448,11 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       throw error;
     }
   };
-  const grantController = (sessionId: string, generationAlreadyChanged = false): void => {
+  const grantController = (session: AuthSession, generationAlreadyChanged = false): void => {
     recoverableControllerSessionId = undefined;
     clearDisconnectGrace();
-    controllerOwner = sessionId;
+    controllerOwner = session.id;
+    controllerSession = session;
     if (!generationAlreadyChanged) controllerGeneration += 1;
     controllerLeaseExpiresAt = now() + controllerLeaseMilliseconds;
     scheduleControllerExpiry();
@@ -429,17 +462,26 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     commandInFlight && controllerOwner !== undefined
       ? revokeControllerState()
       : serializeControl(revokeControllerState);
-  const revokeExpiredController = async (): Promise<void> => {
+  async function revokeExpiredController(): Promise<void> {
     try {
       await revokeController();
     } catch {
       server.log.error("Unable to restore Read-Only Mode after authentication expiry.");
     }
-  };
+  }
   const expireController = async (): Promise<void> => {
-    if (commandInFlight && controllerLeaseExpiresAt !== undefined && now() >= controllerLeaseExpiresAt)
+    const authenticationExpired = controllerOwner !== undefined && !authenticator.valid(controllerOwner);
+    if (
+      commandInFlight &&
+      (authenticationExpired || (controllerLeaseExpiresAt !== undefined && now() >= controllerLeaseExpiresAt))
+    )
       await revokeControllerState();
     return serializeControl(async () => {
+      if (controllerOwner === undefined) return;
+      if (!authenticator.valid(controllerOwner)) {
+        await revokeControllerState();
+        return;
+      }
       if (controllerLeaseExpiresAt === undefined || now() < controllerLeaseExpiresAt) {
         scheduleControllerExpiry();
         return;
@@ -454,7 +496,11 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     if (controllerExpiryTimer !== undefined) timers.clearTimeout(controllerExpiryTimer);
     controllerExpiryTimer = undefined;
     if (controllerLeaseExpiresAt === undefined) return;
-    controllerExpiryTimer = timers.setTimeout(onControllerExpired, Math.max(0, controllerLeaseExpiresAt - now()));
+    const authenticationExpiresAt = controllerSession
+      ? Math.min(controllerSession.expiresAt, controllerSession.lastActivityAt + authConstants.inactivityMs)
+      : Number.POSITIVE_INFINITY;
+    const expiresAt = Math.min(controllerLeaseExpiresAt, authenticationExpiresAt);
+    controllerExpiryTimer = timers.setTimeout(onControllerExpired, Math.max(0, expiresAt - now()));
   };
 
   server.decorate("eventSequence", eventSequence);
@@ -468,6 +514,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       controllerExpiryTimer = undefined;
       clearDisconnectGrace();
       controllerOwner = undefined;
+      controllerSession = undefined;
       recoverableControllerSessionId = undefined;
       controllerLeaseExpiresAt = undefined;
       controllerGeneration += 1;
@@ -504,7 +551,8 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       ["/api/v1/build", "/api/v1/snapshot", "/api/v1/events", "/api/v1/diagnostics"].includes(pathname) ||
       pathname.startsWith("/api/v1/controller/") ||
       pathname.startsWith("/api/v1/opcua/") ||
-      pathname.startsWith("/api/v1/address-space/");
+      pathname.startsWith("/api/v1/address-space/") ||
+      pathname.startsWith("/api/v1/saved-connections");
     if (isLogin && !sameOrigin(request, config)) {
       void reply.code(403).send(errorBody("origin_rejected", "The request origin is not allowed."));
       return;
@@ -513,6 +561,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       if (isAuthSession) {
         const token = cookieValue(request.headers.cookie);
         current.authSession = authenticator.session(token);
+        if (current.authSession?.id === controllerOwner) scheduleControllerExpiry();
         if (!current.authSession && token === controllerOwner) await revokeExpiredController();
       }
       return;
@@ -529,6 +578,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       return;
     }
     current.authSession = session;
+    if (session.id === controllerOwner) scheduleControllerExpiry();
   });
 
   server.setErrorHandler((error, request, reply) => {
@@ -565,14 +615,24 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   );
   server.post("/api/v1/auth/logout", async (request, reply) => {
     const session = (request as RequestWithSession).authSession!;
+    authenticator.logout(cookieValue(request.headers.cookie));
+    for (const client of [...eventClients]) if (client.sessionId === session.id) closeEventClient(client);
+    const revokedDuringCommand = controllerOwner === session.id && commandInFlight;
+    if (revokedDuringCommand) {
+      logoutRevokedSession = session.id;
+      await revokeControllerState();
+    }
     await serializeControl(async () => {
-      if (controllerOwner !== session.id && recoverableControllerSessionId !== session.id) return;
+      if (controllerOwner !== session.id && recoverableControllerSessionId !== session.id) {
+        if (logoutRevokedSession === session.id) logoutRevokedSession = undefined;
+        return;
+      }
       if (controllerOwner === session.id) await revokeControllerState();
       clearDisconnectGrace();
       recoverableControllerSessionId = undefined;
       await disconnectRuntime("Unable to disconnect the runtime after logout.");
+      if (logoutRevokedSession === session.id) logoutRevokedSession = undefined;
     });
-    authenticator.logout(cookieValue(request.headers.cookie));
     reply.header(
       "Set-Cookie",
       `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict${config.secureCookies ? "; Secure" : ""}; Max-Age=0`,
@@ -609,7 +669,9 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   server.get("/api/v1/snapshot", async (request) => currentSnapshot(request));
   server.post("/api/v1/controller/attach", async (request, reply) => {
     const session = (request as RequestWithSession).authSession!;
+    let authorized = true;
     await serializeControl(async () => {
+      if (!(authorized = revalidateControllerSession(session, reply))) return;
       if (controllerOwner !== undefined) {
         if (controllerOwner === session.id) {
           controllerLeaseExpiresAt = now() + controllerLeaseMilliseconds;
@@ -618,8 +680,9 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
         return;
       }
       if (recoverableControllerSessionId !== undefined) return;
-      grantController(session.id);
+      grantController(session);
     });
+    if (!authorized) return;
     return reply.send(
       controllerState(
         session,
@@ -632,13 +695,16 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   });
   server.post("/api/v1/controller/recover", async (request, reply) => {
     const session = (request as RequestWithSession).authSession!;
+    let authorized = true;
     let recovered = false;
     await serializeControl(async () => {
+      if (!(authorized = revalidateControllerSession(session, reply))) return;
       if (controllerOwner !== undefined || recoverableControllerSessionId !== session.id) return;
       await restoreReadOnly();
-      grantController(session.id);
+      grantController(session);
       recovered = true;
     });
+    if (!authorized) return;
     if (!recovered)
       return reply
         .code(409)
@@ -655,14 +721,18 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   });
   server.post("/api/v1/controller/takeover", async (request, reply) => {
     const session = (request as RequestWithSession).authSession!;
+    if (!revalidateControllerSession(session, reply)) return;
     // Revoke immediately even when an old controller's OPC UA request is still in flight.
     if (commandInFlight && controllerOwner !== undefined) await revokeControllerState();
+    let authorized = true;
     await serializeControl(async () => {
+      if (!(authorized = revalidateControllerSession(session, reply))) return;
       const hadController = controllerOwner !== undefined;
       if (hadController) await revokeControllerState();
       else await restoreReadOnly();
-      grantController(session.id, hadController);
+      grantController(session, hadController);
     });
+    if (!authorized) return;
     return reply.send(
       controllerState(
         session,
@@ -677,6 +747,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     const session = (request as RequestWithSession).authSession!;
     const generation = Number(new URL(request.url, config.publicOrigin).searchParams.get("controllerGeneration"));
     return serializeControl(async () => {
+      if (!revalidateControllerSession(session, reply)) return;
       if (
         !Number.isSafeInteger(generation) ||
         generation !== controllerGeneration ||
@@ -700,6 +771,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     });
   });
   let commandInFlight = false;
+  let logoutRevokedSession: string | undefined;
   const controllerCommand = async <T>(
     request: FastifyRequest,
     reply: FastifyReply,
@@ -708,6 +780,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   ): Promise<T | undefined> =>
     serializeControl(async () => {
       const session = (request as RequestWithSession).authSession!;
+      if (!revalidateControllerSession(session, reply)) return;
       const generation = Number(new URL(request.url, config.publicOrigin).searchParams.get("controllerGeneration"));
       if (controllerOwner === session.id && controllerLeaseExpiresAt !== undefined && now() >= controllerLeaseExpiresAt)
         await revokeControllerState();
@@ -721,13 +794,15 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       try {
         const result = await operation();
         if (
+          !authenticator.valid(session.id) ||
           controllerOwner !== session.id ||
           generation !== controllerGeneration ||
           controllerLeaseExpiresAt === undefined ||
           now() >= controllerLeaseExpiresAt
         ) {
           if (controllerOwner === session.id) await revokeControllerState();
-          if (connectionChange) await disconnectRuntime("Unable to disconnect the runtime after controller loss.");
+          if (connectionChange && logoutRevokedSession !== session.id)
+            await disconnectRuntime("Unable to disconnect the runtime after controller loss.");
           void reply
             .code(409)
             .send(errorBody("controller_generation_mismatch", "The controller lease is no longer current."));
@@ -742,22 +817,63 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     const body = request.body;
     return body && typeof body === "object" ? (body as T) : undefined;
   };
-  const endpointRequest = (request: FastifyRequest): EndpointDiscoveryRequest | undefined => {
-    const body = requestBody<EndpointDiscoveryRequest>(request);
-    if (
-      !body ||
-      typeof body.endpointUrl !== "string" ||
-      body.endpointUrl.length === 0 ||
-      body.endpointUrl.length > 2048
-    )
-      return undefined;
+  const sanitizeEndpoint = (value: unknown): string | undefined => {
+    if (typeof value !== "string" || value.length === 0 || value.length > 2048) return undefined;
     try {
-      const endpoint = new URL(body.endpointUrl);
-      if (endpoint.protocol !== "opc.tcp:" || endpoint.username || endpoint.password) return undefined;
+      const endpoint = new URL(value);
+      if (endpoint.protocol !== "opc.tcp:" || !endpoint.hostname) return undefined;
+      endpoint.username = "";
+      endpoint.password = "";
+      return `${endpoint.protocol}//${endpoint.host}${endpoint.pathname === "/" ? "" : endpoint.pathname}${endpoint.search}${endpoint.hash}`;
     } catch {
       return undefined;
     }
-    return { endpointUrl: body.endpointUrl };
+  };
+  const endpointRequest = (request: FastifyRequest): EndpointDiscoveryRequest | undefined => {
+    const body = requestBody<EndpointDiscoveryRequest>(request);
+    const endpointUrl = sanitizeEndpoint(body?.endpointUrl);
+    return endpointUrl === undefined ? undefined : { endpointUrl };
+  };
+  const savedConnectionId = (request: FastifyRequest): string | undefined => {
+    const id = (request.params as { id?: unknown } | undefined)?.id;
+    return typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id) ? id : undefined;
+  };
+  const savedConnectionRequest = (request: FastifyRequest): SavedConnectionRequest | undefined => {
+    const body = requestBody<Partial<SavedConnectionRequest>>(request);
+    if (
+      !body ||
+      typeof body.name !== "string" ||
+      body.name.length < 1 ||
+      body.name.length > 256 ||
+      typeof body.endpoint !== "string" ||
+      body.endpoint.length < 1 ||
+      body.endpoint.length > 2048 ||
+      typeof body.securityPolicy !== "string" ||
+      body.securityPolicy.length < 1 ||
+      body.securityPolicy.length > 256 ||
+      !["None", "Sign", "SignAndEncrypt"].includes(body.securityMode ?? "")
+    )
+      return undefined;
+    const endpoint = sanitizeEndpoint(body.endpoint);
+    if (endpoint === undefined) return undefined;
+    if (body.username !== undefined && (typeof body.username !== "string" || body.username.length > 256))
+      return undefined;
+    const hasValidPin = typeof body.serverCertificatePin === "string" && SHA256_PIN.test(body.serverCertificatePin);
+    if (body.serverCertificatePin !== undefined && !hasValidPin) return undefined;
+    if (body.certificateReviewRequired !== undefined && body.certificateReviewRequired !== true) return undefined;
+    if (body.securityMode !== "None" && !hasValidPin && body.certificateReviewRequired !== true) return undefined;
+    return { ...body, endpoint } as SavedConnectionRequest;
+  };
+  const savedConnectionConnectRequest = (request: FastifyRequest): SavedConnectionConnectRequest => {
+    const body = requestBody<{ userSecret?: unknown; password?: unknown }>(request);
+    const secret = body?.userSecret ?? body?.password;
+    return secret === undefined
+      ? {}
+      : typeof secret === "string" && secret.length <= 1024
+        ? { userSecret: secret }
+        : (() => {
+            throw new Error("invalid user secret");
+          })();
   };
   const runtimeError = (
     reply: FastifyReply,
@@ -765,6 +881,61 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   ): void => {
     void reply.code(502).send(errorBody(code, "The OPC UA operation could not be completed."));
   };
+  server.get(
+    "/api/v1/saved-connections",
+    async () => (await options.runtime?.listSavedConnections?.()) ?? { mode: "ephemeral", savedConnections: [] },
+  );
+  server.put("/api/v1/saved-connections/:id", async (request, reply) =>
+    controllerCommand(request, reply, async () => {
+      const id = savedConnectionId(request);
+      const body = savedConnectionRequest(request);
+      if (!id || !body) return void reply.code(400).send(errorBody("bad_request", "The Saved Connection is invalid."));
+      if (!options.runtime?.saveSavedConnection) return runtimeError(reply, "operation_failed");
+      try {
+        await options.runtime.saveSavedConnection(id, body);
+        return reply.code(204).send();
+      } catch {
+        return runtimeError(reply, "operation_failed");
+      }
+    }),
+  );
+  server.delete("/api/v1/saved-connections/:id/delete", async (request, reply) =>
+    controllerCommand(request, reply, async () => {
+      const id = savedConnectionId(request);
+      if (!id) return void reply.code(400).send(errorBody("bad_request", "The Saved Connection ID is invalid."));
+      if (!options.runtime?.deleteSavedConnection) return runtimeError(reply, "operation_failed");
+      try {
+        await options.runtime.deleteSavedConnection(id);
+        return reply.code(204).send();
+      } catch {
+        return runtimeError(reply, "operation_failed");
+      }
+    }),
+  );
+  server.post("/api/v1/saved-connections/:id/connect", async (request, reply) =>
+    controllerCommand(
+      request,
+      reply,
+      async () => {
+        const id = savedConnectionId(request);
+        if (!id) return void reply.code(400).send(errorBody("bad_request", "The Saved Connection ID is invalid."));
+        if (!options.runtime?.connectSavedConnection) return runtimeError(reply, "connection_failed");
+        let body: SavedConnectionConnectRequest;
+        try {
+          body = savedConnectionConnectRequest(request);
+          const result = await options.runtime.connectSavedConnection(id, body);
+          if (result?.outcome === "not_found")
+            return void reply
+              .code(404)
+              .send(errorBody("saved_connection_not_found", "The Saved Connection was not found."));
+          return currentSnapshot(request);
+        } catch {
+          return runtimeError(reply, "connection_failed");
+        }
+      },
+      true,
+    ),
+  );
   server.post("/api/v1/opcua/discover", async (request, reply) =>
     controllerCommand(request, reply, async () => {
       const body = endpointRequest(request);
@@ -856,21 +1027,29 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       "Referrer-Policy": "no-referrer",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
     });
+    const heartbeat = (): void => {
+      if (client.closed) return;
+      if (expireEventClient(client)) return;
+      if (client.paused) return;
+      try {
+        client.paused = !client.response.write(": heartbeat\n\n");
+      } catch {
+        closeEventClient(client);
+      }
+    };
+    const heartbeatHandle = timers.setInterval
+      ? timers.setInterval(heartbeat, SSE_HEARTBEAT_MS)
+      : setInterval(heartbeat, SSE_HEARTBEAT_MS);
     const client: EventClient = {
+      sessionId: (request as RequestWithSession).authSession!.id,
       response: reply.raw,
       queue: [],
       paused: false,
       closed: false,
-      heartbeat: setInterval(() => {
-        if (client.closed || client.paused) return;
-        try {
-          client.paused = !client.response.write(": heartbeat\n\n");
-        } catch {
-          closeEventClient(client);
-        }
-      }, SSE_HEARTBEAT_MS),
+      heartbeat: heartbeatHandle,
     };
-    client.heartbeat.unref();
+    if (typeof client.heartbeat === "object" && client.heartbeat !== null && "unref" in client.heartbeat)
+      (client.heartbeat as NodeJS.Timeout).unref();
     eventClients.add(client);
     reply.raw.on("drain", () => flushEventClient(client));
     const oldest = eventHistory[0]?.sequence;

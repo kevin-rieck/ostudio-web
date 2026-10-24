@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, writeFile } from "node:fs/promises";
+import { request } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { createServer, type TimerScheduler, type WebServer } from "./server.js";
@@ -15,16 +16,19 @@ function fakeTimers(): {
   now: () => number;
   setTime: (value: number) => void;
   scheduled: Array<{ callback: () => void; milliseconds: number }>;
+  intervals: Array<{ callback: () => void; milliseconds: number }>;
   timers: TimerScheduler;
 } {
   let timestamp = 0;
   const scheduled: Array<{ callback: () => void; milliseconds: number }> = [];
+  const intervals: Array<{ callback: () => void; milliseconds: number }> = [];
   return {
     now: () => timestamp,
     setTime: (value) => {
       timestamp = value;
     },
     scheduled,
+    intervals,
     timers: {
       setTimeout: (callback, milliseconds) => {
         const entry = { callback, milliseconds };
@@ -34,6 +38,15 @@ function fakeTimers(): {
       clearTimeout: (handle) => {
         const index = scheduled.indexOf(handle as (typeof scheduled)[number]);
         if (index >= 0) scheduled.splice(index, 1);
+      },
+      setInterval: (callback, milliseconds) => {
+        const entry = { callback, milliseconds };
+        intervals.push(entry);
+        return entry;
+      },
+      clearInterval: (handle) => {
+        const index = intervals.indexOf(handle as (typeof intervals)[number]);
+        if (index >= 0) intervals.splice(index, 1);
       },
     },
   };
@@ -111,6 +124,176 @@ describe("server routes", () => {
     expect(
       (await server.inject({ method: "GET", url: "/api/v1/build", headers: { cookie: String(cookie) } })).statusCode,
     ).toBe(200);
+  });
+
+  it("manages Saved Connections through authenticated controller routes", async () => {
+    const calls: string[] = [];
+    let savedEndpoint = "";
+    server = await createServer({
+      env: developmentEnvironment,
+      runtime: {
+        listSavedConnections: async () => ({ mode: "durable", savedConnections: [] }),
+        saveSavedConnection: async (id, request) => {
+          calls.push(`save:${id}`);
+          savedEndpoint = request.endpoint;
+        },
+        deleteSavedConnection: async (id) => {
+          calls.push(`delete:${id}`);
+        },
+        connectSavedConnection: async (id, request) => {
+          calls.push(`connect:${id}:${request.userSecret ?? ""}`);
+        },
+      },
+    });
+    const login = await server.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { origin: "http://localhost:8080" },
+      payload: { username: "admin", password: "correct horse battery staple" },
+    });
+    const cookie = String(login.headers["set-cookie"]);
+    expect((await server.inject({ method: "GET", url: "/api/v1/saved-connections" })).statusCode).toBe(401);
+    expect(
+      (await server.inject({ method: "GET", url: "/api/v1/saved-connections", headers: { cookie } })).json(),
+    ).toEqual({ mode: "durable", savedConnections: [] });
+    await server.inject({
+      method: "POST",
+      url: "/api/v1/controller/attach",
+      headers: { origin: "http://localhost:8080", cookie },
+    });
+    const headers = { origin: "http://localhost:8080", cookie };
+    expect(
+      (
+        await server.inject({
+          method: "PUT",
+          url: "/api/v1/saved-connections/plc?controllerGeneration=1",
+          headers,
+          payload: {
+            name: "PLC",
+            endpoint: "opc.tcp://engineer:secret@plc:4840/path",
+            securityPolicy: "None",
+            securityMode: "None",
+          },
+        })
+      ).statusCode,
+    ).toBe(204);
+    expect(
+      (
+        await server.inject({
+          method: "POST",
+          url: "/api/v1/saved-connections/plc/connect?controllerGeneration=1",
+          headers,
+          payload: { userSecret: "transient" },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await server.inject({
+          method: "DELETE",
+          url: "/api/v1/saved-connections/plc/delete?controllerGeneration=1",
+          headers,
+        })
+      ).statusCode,
+    ).toBe(204);
+    expect(calls).toEqual(["save:plc", "connect:plc:transient", "delete:plc"]);
+    expect(savedEndpoint).toBe("opc.tcp://plc:4840/path");
+  });
+
+  it("rejects unsafe secure Saved Connection certificate pins at the HTTP boundary", async () => {
+    const saved: Array<import("@ostudio/contracts").SavedConnectionRequest> = [];
+    server = await createServer({
+      env: developmentEnvironment,
+      runtime: {
+        saveSavedConnection: async (_id, request) => {
+          saved.push(request);
+        },
+      },
+    });
+    const login = await server.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { origin: "http://localhost:8080" },
+      payload: { username: "admin", password: "correct horse battery staple" },
+    });
+    const cookie = String(login.headers["set-cookie"]);
+    const headers = { origin: "http://localhost:8080", cookie };
+    await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers });
+    const secure = {
+      name: "PLC",
+      endpoint: "opc.tcp://plc:4840",
+      securityPolicy: "Basic256Sha256",
+      securityMode: "SignAndEncrypt" as const,
+    };
+    for (const pin of [undefined, "sha256:abc", "0123456789abcdef0123456789abcdef01234567"]) {
+      const response = await server.inject({
+        method: "PUT",
+        url: "/api/v1/saved-connections/plc?controllerGeneration=1",
+        headers,
+        payload: { ...secure, ...(pin === undefined ? {} : { serverCertificatePin: pin }) },
+      });
+      expect(response.statusCode).toBe(400);
+    }
+    const valid = await server.inject({
+      method: "PUT",
+      url: "/api/v1/saved-connections/valid?controllerGeneration=1",
+      headers,
+      payload: {
+        ...secure,
+        serverCertificatePin: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      },
+    });
+    expect(valid.statusCode).toBe(204);
+    const review = await server.inject({
+      method: "PUT",
+      url: "/api/v1/saved-connections/legacy?controllerGeneration=1",
+      headers,
+      payload: { ...secure, certificateReviewRequired: true },
+    });
+    expect(review.statusCode).toBe(204);
+    expect(saved).toHaveLength(2);
+  });
+
+  it("returns typed not-found and bad-request responses for Saved Connection reconnects", async () => {
+    server = await createServer({
+      env: developmentEnvironment,
+      runtime: {
+        snapshot: () => ({
+          sequence: 0,
+          buildVersion: "test",
+          generatedAt: new Date(0).toISOString(),
+          controller: { role: "controller", controllerGeneration: 1 },
+          safety: { readOnly: true, safetyGeneration: 1 },
+          connection: { state: "disconnected" },
+          nodes: [],
+        }),
+        connectSavedConnection: async () => ({ outcome: "not_found" }),
+      },
+    });
+    const login = await server.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { origin: "http://localhost:8080" },
+      payload: { username: "admin", password: "correct horse battery staple" },
+    });
+    const cookie = String(login.headers["set-cookie"]);
+    const headers = { origin: "http://localhost:8080", cookie };
+    await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers });
+    const missing = await server.inject({
+      method: "POST",
+      url: "/api/v1/saved-connections/plc/connect?controllerGeneration=1",
+      headers,
+    });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json()).toMatchObject({ code: "saved_connection_not_found" });
+
+    const invalid = await server.inject({
+      method: "POST",
+      url: "/api/v1/saved-connections/not%20valid/connect?controllerGeneration=1",
+      headers,
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json()).toMatchObject({ code: "bad_request" });
   });
 
   it("uses one generic failed-login response and rejects cross-origin state changes", async () => {
@@ -863,6 +1046,43 @@ describe("server routes", () => {
     expect(calls).toEqual([]);
   });
 
+  it("revokes authentication before a slow logout disconnect finishes", async () => {
+    let releaseDisconnect!: () => void;
+    const disconnecting = new Promise<void>((resolve) => {
+      releaseDisconnect = resolve;
+    });
+    server = await createServer({
+      env: developmentEnvironment,
+      runtime: { disconnect: () => disconnecting },
+    });
+    const login = await server.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { origin: "http://localhost:8080" },
+      payload: { username: "admin", password: "correct horse battery staple" },
+    });
+    const cookie = String(login.headers["set-cookie"]);
+    await server.inject({
+      method: "POST",
+      url: "/api/v1/controller/attach",
+      headers: { origin: "http://localhost:8080", cookie },
+    });
+    const logout = server.inject({
+      method: "POST",
+      url: "/api/v1/auth/logout",
+      headers: { origin: "http://localhost:8080", cookie },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    try {
+      expect((await server.inject({ method: "GET", url: "/api/v1/snapshot", headers: { cookie } })).statusCode).toBe(
+        401,
+      );
+    } finally {
+      releaseDisconnect();
+    }
+    expect((await logout).statusCode).toBe(204);
+  });
+
   it("revokes the old browser on takeover", async () => {
     server = await createServer({
       env: {
@@ -905,6 +1125,290 @@ describe("server routes", () => {
         })
       ).statusCode,
     ).toBe(409);
+  });
+
+  it("restores Read-Only Mode immediately when logout races a queued command", async () => {
+    let beginDiscovery!: () => void;
+    let finishDiscovery!: () => void;
+    const started = new Promise<void>((resolve) => {
+      beginDiscovery = resolve;
+    });
+    const pending = new Promise<void>((resolve) => {
+      finishDiscovery = resolve;
+    });
+    const calls: string[] = [];
+    server = await createServer({
+      env: developmentEnvironment,
+      runtime: {
+        discover: async () => {
+          beginDiscovery();
+          await pending;
+          return { servers: [], endpoints: [] };
+        },
+        setReadOnly: () => {
+          calls.push("read-only");
+        },
+        disconnect: async () => {
+          calls.push("disconnect");
+        },
+      },
+    });
+    const login = await server.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { origin: "http://localhost:8080" },
+      payload: { username: "admin", password: "correct horse battery staple" },
+    });
+    const cookie = String(login.headers["set-cookie"]);
+    await server.inject({
+      method: "POST",
+      url: "/api/v1/controller/attach",
+      headers: { origin: "http://localhost:8080", cookie },
+    });
+    const command = server.inject({
+      method: "POST",
+      url: "/api/v1/opcua/discover?controllerGeneration=1",
+      headers: { origin: "http://localhost:8080", cookie },
+      payload: { endpointUrl: "opc.tcp://plc:4840" },
+    });
+    await started;
+    const logout = server.inject({
+      method: "POST",
+      url: "/api/v1/auth/logout",
+      headers: { origin: "http://localhost:8080", cookie },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(calls).toEqual(["read-only"]);
+    finishDiscovery();
+    expect((await command).statusCode).toBe(409);
+    expect((await logout).statusCode).toBe(204);
+    expect(calls).toEqual(["read-only", "disconnect"]);
+  });
+
+  it("closes a browser's live event stream on logout", async () => {
+    server = await createServer({ env: developmentEnvironment });
+    const login = await server.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { origin: "http://localhost:8080" },
+      payload: { username: "admin", password: "correct horse battery staple" },
+    });
+    const cookie = String(login.headers["set-cookie"]);
+    const stream = server.inject({
+      method: "GET",
+      url: "/api/v1/events?afterSequence=0",
+      headers: { origin: "http://localhost:8080", cookie },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const logout = await server.inject({
+      method: "POST",
+      url: "/api/v1/auth/logout",
+      headers: { origin: "http://localhost:8080", cookie },
+    });
+    expect(logout.statusCode).toBe(204);
+    expect((await stream).statusCode).toBe(200);
+  });
+
+  it("does not deliver events to an expired authenticated browser", async () => {
+    const clock = fakeTimers();
+    server = await createServer({ env: developmentEnvironment, now: clock.now, timers: clock.timers });
+    const login = await server.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { origin: "http://localhost:8080" },
+      payload: { username: "admin", password: "correct horse battery staple" },
+    });
+    const stream = server.inject({
+      method: "GET",
+      url: "/api/v1/events?afterSequence=0",
+      headers: { origin: "http://localhost:8080", cookie: String(login.headers["set-cookie"]) },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    clock.setTime(24 * 60 * 60 * 1000);
+    server.publishEvent("snapshot-required", { reason: "reconnect" });
+    const response = await stream;
+    expect(response.statusCode).toBe(200);
+    expect(response.body).not.toContain('"reason":"reconnect"');
+  });
+
+  it("revokes control when an idle event stream detects authentication expiry", async () => {
+    const clock = fakeTimers();
+    const calls: string[] = [];
+    server = await createServer({
+      env: developmentEnvironment,
+      now: clock.now,
+      timers: clock.timers,
+      controllerLeaseMilliseconds: 2 * 24 * 60 * 60 * 1000,
+      controllerDisconnectGraceMilliseconds: 20,
+      runtime: {
+        setReadOnly: () => {
+          calls.push("read-only");
+        },
+      },
+    });
+    const login = await server.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { origin: "http://localhost:8080" },
+      payload: { username: "admin", password: "correct horse battery staple" },
+    });
+    const cookie = String(login.headers["set-cookie"]);
+    await server.inject({
+      method: "POST",
+      url: "/api/v1/controller/attach",
+      headers: { origin: "http://localhost:8080", cookie },
+    });
+    const stream = server.inject({
+      method: "GET",
+      url: "/api/v1/events?afterSequence=0",
+      headers: { origin: "http://localhost:8080", cookie },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    clock.setTime(24 * 60 * 60 * 1000);
+    expect(clock.intervals).toHaveLength(1);
+    clock.intervals[0]!.callback();
+    expect((await stream).statusCode).toBe(200);
+    await Promise.resolve();
+    expect(calls).toEqual(["read-only"]);
+    const observerLogin = await server.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { origin: "http://localhost:8080" },
+      payload: { username: "admin", password: "correct horse battery staple" },
+    });
+    expect(
+      (
+        await server.inject({
+          method: "GET",
+          url: "/api/v1/snapshot",
+          headers: { cookie: String(observerLogin.headers["set-cookie"]) },
+        })
+      ).json(),
+    ).toMatchObject({ controller: { role: "observer", controllerGeneration: 2 } });
+    expect(clock.scheduled).toHaveLength(1);
+  });
+
+  it("revokes a controller when authentication expires without an event stream", async () => {
+    const clock = fakeTimers();
+    const calls: string[] = [];
+    server = await createServer({
+      env: developmentEnvironment,
+      now: clock.now,
+      timers: clock.timers,
+      controllerLeaseMilliseconds: 2 * 24 * 60 * 60 * 1000,
+      runtime: {
+        setReadOnly: () => {
+          calls.push("read-only");
+        },
+      },
+    });
+    const login = await server.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { origin: "http://localhost:8080" },
+      payload: { username: "admin", password: "correct horse battery staple" },
+    });
+    const cookie = String(login.headers["set-cookie"]);
+    await server.inject({
+      method: "POST",
+      url: "/api/v1/controller/attach",
+      headers: { origin: "http://localhost:8080", cookie },
+    });
+    clock.setTime(12 * 60 * 60 * 1000);
+    clock.scheduled[0]!.callback();
+    await Promise.resolve();
+    expect(calls).toEqual(["read-only"]);
+  });
+
+  it("does not revoke an active controller when an observer's event stream expires", async () => {
+    const clock = fakeTimers();
+    server = await createServer({
+      env: developmentEnvironment,
+      now: clock.now,
+      timers: clock.timers,
+      controllerLeaseMilliseconds: 2 * 24 * 60 * 60 * 1000,
+    });
+    const login = async () => {
+      const response = await server!.inject({
+        method: "POST",
+        url: "/api/v1/auth/login",
+        headers: { origin: "http://localhost:8080" },
+        payload: { username: "admin", password: "correct horse battery staple" },
+      });
+      return String(response.headers["set-cookie"]);
+    };
+    const observer = await login();
+    const stream = server.inject({
+      method: "GET",
+      url: "/api/v1/events?afterSequence=0",
+      headers: { origin: "http://localhost:8080", cookie: observer },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    clock.setTime(11 * 60 * 60 * 1000);
+    const controller = await login();
+    await server.inject({
+      method: "POST",
+      url: "/api/v1/controller/attach",
+      headers: { origin: "http://localhost:8080", cookie: controller },
+    });
+    clock.setTime(13 * 60 * 60 * 1000);
+    clock.intervals[0]!.callback();
+    expect((await stream).statusCode).toBe(200);
+    expect(
+      (await server.inject({ method: "GET", url: "/api/v1/snapshot", headers: { cookie: controller } })).json(),
+    ).toMatchObject({ controller: { role: "controller", controllerGeneration: 1 } });
+  });
+
+  it("closes an expired backpressured stream before draining queued events", async () => {
+    const clock = fakeTimers();
+    server = await createServer({ env: developmentEnvironment, now: clock.now, timers: clock.timers });
+    const login = await server.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { origin: "http://localhost:8080" },
+      payload: { username: "admin", password: "correct horse battery staple" },
+    });
+    const address = await server.listen({ port: 0, host: "127.0.0.1" });
+    const port = Number(new URL(address).port);
+    let response!: import("node:http").IncomingMessage;
+    let finishBody!: (body: string) => void;
+    let failBody!: (error: Error) => void;
+    const body = new Promise<string>((resolve, reject) => {
+      finishBody = resolve;
+      failBody = reject;
+    });
+    const connected = new Promise<void>((resolve, reject) => {
+      const chunks: string[] = [];
+      const stream = request(
+        {
+          hostname: "127.0.0.1",
+          port,
+          path: "/api/v1/events?afterSequence=0",
+          headers: { origin: "http://localhost:8080", cookie: String(login.headers["set-cookie"]) },
+        },
+        (incoming) => {
+          response = incoming;
+          incoming.setEncoding("utf8");
+          incoming.on("data", (chunk: string) => chunks.push(chunk));
+          incoming.on("end", () => finishBody(chunks.join("")));
+          incoming.on("error", failBody);
+          incoming.pause();
+          resolve();
+        },
+      );
+      stream.on("error", reject);
+      stream.end();
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await connected;
+    server.publishEvent("live-value-changed", {
+      nodeId: "ns=1;s=slow",
+      liveValue: { displayValue: "x".repeat(20_000), status: "Good", stale: false },
+    });
+    server.publishEvent("snapshot-required", { reason: "reconnect" });
+    clock.setTime(24 * 60 * 60 * 1000);
+    response.resume();
+    await expect(body).resolves.not.toContain('"reason":"reconnect"');
   });
 
   it("uses server-owned event sequences and emits a gap resynchronization", async () => {
