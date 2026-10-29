@@ -568,6 +568,147 @@ describe("application facade", () => {
     expect(application.snapshot().watchlist).toEqual(["ns=2;s=one", "ns=2;s=two"]);
   });
 
+  it("does not infer Variable Node ValueRank or ArrayDimensions from the current Variant", async () => {
+    const opcua = client();
+    const connect = opcua.connect;
+    opcua.connect = async (request) => {
+      const session = await connect(request);
+      return {
+        ...session,
+        read: (async (readRequest: OpcUaReadRequest | OpcUaReadRequest[]) => {
+          const result = {
+            nodeId: "ns=2;s=array",
+            attributeId: 13,
+            dataValue: {
+              status: { name: "Good", value: 0 },
+              value: { dataType: "Double" as const, arrayType: "Array" as const, value: [1, 2], dimensions: [2] },
+            },
+          };
+          return Array.isArray(readRequest) ? readRequest.map(() => result) : result;
+        }) as OpcUaSession["read"],
+      };
+    };
+    const application = createApplication({
+      clientFactory: () => opcua,
+      savedConnections: store,
+      clock: { now: () => new Date("2026-01-01T00:00:00.000Z") },
+      events: { publish: () => undefined },
+    });
+    await application.connect({ endpointUrl: "opc.tcp://plc:4840" });
+    const inspection = await application.inspectVariable("ns=2;s=array");
+    expect(inspection.metadata).toMatchObject({ dataType: "Double" });
+    expect(inspection.metadata).not.toHaveProperty("valueRank");
+    expect(inspection.metadata).not.toHaveProperty("arrayDimensions");
+  });
+
+  it("bounds retained inspections while preserving the focused Variable Node and Watchlist", async () => {
+    const application = createApplication({
+      clientFactory: client,
+      savedConnections: store,
+      clock: { now: () => new Date("2026-01-01T00:00:00.000Z") },
+      config: { watchlistLimit: 2 },
+      events: { publish: () => undefined },
+    });
+    await application.connect({ endpointUrl: "opc.tcp://plc:4840" });
+    for (const nodeId of ["ns=2;s=watched-one", "ns=2;s=watched-two"]) {
+      await application.inspectVariable(nodeId);
+      await application.addToWatchlist(nodeId);
+    }
+    for (let index = 0; index < 105; index += 1) await application.inspectVariable(`ns=2;s=inspection-${index}`);
+    await application.inspectVariable("ns=2;s=watched-one");
+    await application.inspectVariable("ns=2;s=inspection-105");
+    const inspections = application.snapshot().inspections;
+    expect(Object.keys(inspections)).toHaveLength(100);
+    expect(inspections).toHaveProperty("ns=2;s=inspection-105");
+    expect(inspections).toHaveProperty("ns=2;s=watched-one");
+    expect(inspections).toHaveProperty("ns=2;s=watched-two");
+    expect(inspections).not.toHaveProperty("ns=2;s=inspection-0");
+  });
+
+  it("bounds Session Trend nodes and retains current Watchlist trends", async () => {
+    const handlers = new Map<string, (value: OpcUaDataValue) => void>();
+    const opcua = client();
+    const connect = opcua.connect;
+    opcua.connect = async (request) => ({
+      ...(await connect(request)),
+      subscribe: async ({ nodeId }, handler) => {
+        handlers.set(nodeId, handler);
+        return { unsubscribe: async () => undefined };
+      },
+    });
+    const application = createApplication({
+      clientFactory: () => opcua,
+      savedConnections: store,
+      clock: { now: () => new Date("2026-01-01T00:00:00.000Z") },
+      events: { publish: () => undefined },
+    });
+    await application.connect({ endpointUrl: "opc.tcp://plc:4840" });
+    await application.addToWatchlist("ns=2;s=watched");
+    await application.subscribe("ns=2;s=watched");
+    handlers.get("ns=2;s=watched")?.({
+      status: { name: "Good", value: 0 },
+      value: { dataType: "Double", arrayType: "Scalar", value: 1 },
+    });
+    for (let index = 0; index < 100; index += 1) {
+      const nodeId = `ns=2;s=historical-${index}`;
+      await application.subscribe(nodeId);
+      handlers.get(nodeId)?.({
+        status: { name: "Good", value: 0 },
+        value: { dataType: "Double", arrayType: "Scalar", value: index },
+      });
+    }
+    const trends = application.snapshot().trends;
+    expect(Object.keys(trends)).toHaveLength(100);
+    expect(trends).toHaveProperty("ns=2;s=watched");
+    expect(trends).toHaveProperty("ns=2;s=historical-99");
+    expect(trends).not.toHaveProperty("ns=2;s=historical-0");
+  });
+
+  it("keeps only 500 Session Trend points and tears down Watchlist subscriptions", async () => {
+    let handler: ((value: OpcUaDataValue) => void) | undefined;
+    let unsubscribeCalls = 0;
+    const opcua = client();
+    opcua.connect = async () => ({
+      ...(await client().connect({ endpointUrl: "opc.tcp://plc:4840" })),
+      subscribe: async (_request, next) => {
+        handler = next;
+        return {
+          unsubscribe: async () => {
+            unsubscribeCalls += 1;
+          },
+        };
+      },
+    });
+    const application = createApplication({
+      clientFactory: () => opcua,
+      savedConnections: store,
+      clock: { now: () => new Date("2026-01-01T00:00:00.000Z") },
+      events: { publish: () => undefined },
+    });
+    await application.connect({ endpointUrl: "opc.tcp://plc:4840" });
+    await application.addToWatchlist("ns=2;s=level");
+    await application.subscribe("ns=2;s=level");
+    for (let index = 0; index < 501; index += 1) {
+      handler?.({
+        status: { name: "Good", value: 0 },
+        value: { dataType: "Double", arrayType: "Scalar", value: index },
+        sourceTimestamp: new Date(index * 1_000).toISOString(),
+      });
+    }
+    expect(application.snapshot().trends["ns=2;s=level"]).toHaveLength(500);
+    expect(application.getTrend("ns=2;s=level")[0]?.value).toBe(1);
+    expect(application.getTrend("ns=2;s=level").at(-1)?.value).toBe(500);
+    await application.unsubscribe("ns=2;s=level");
+    handler?.({
+      status: { name: "Good", value: 0 },
+      value: { dataType: "Double", arrayType: "Scalar", value: 501 },
+    });
+    await application.removeFromWatchlist("ns=2;s=level");
+    expect(unsubscribeCalls).toBe(1);
+    expect(application.snapshot().watchlist).toEqual([]);
+    expect(application.getTrend("ns=2;s=level")).toHaveLength(500);
+  });
+
   it("marks an inspected value stale after loss and reports range violations", async () => {
     let lost = (): void => undefined;
     const opcua = client();

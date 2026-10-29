@@ -3,12 +3,27 @@ import { describe, expect, it } from "vitest";
 import {
   projectDataValue,
   projectLocalizedText,
+  projectNodeClass,
   projectReference,
   projectVariant,
   safeAdvertisedUrl,
 } from "./projection";
 
 describe("node-opcua transport projection", () => {
+  it.each([
+    [1, "Object"],
+    [2, "Variable"],
+    [4, "Method"],
+    [8, "ObjectType"],
+    [16, "VariableType"],
+    [32, "ReferenceType"],
+    [64, "DataType"],
+    [128, "View"],
+    [256, "Unspecified"],
+  ] as const)("maps OPC UA NodeClass value %i", (value, expected) => {
+    expect(projectNodeClass(value)).toBe(expected);
+  });
+
   it.each([
     [DataType.Null, null, null],
     [DataType.Boolean, true, true],
