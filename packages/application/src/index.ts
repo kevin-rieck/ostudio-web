@@ -1029,12 +1029,25 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
       const generation = state.connection.connectionGeneration;
       const result = await safeRead(currentSession, generation, () => currentSession.read({ nodeId }));
       const value = result.dataValue;
+      const variant = value.value;
+      const dimensions =
+        variant?.dimensions ??
+        (variant?.arrayType === "Array" && Array.isArray(variant.value) ? [variant.value.length] : undefined);
+      const resolvedMetadata: VariableNodeMetadata = {
+        ...metadata,
+        nodeId,
+        ...(!metadata?.dataType && variant?.dataType ? { dataType: variant.dataType } : {}),
+        ...(metadata?.valueRank === undefined && variant
+          ? { valueRank: variant.arrayType === "Scalar" ? -1 : (dimensions?.length ?? 1) }
+          : {}),
+        ...(!metadata?.arrayDimensions && dimensions ? { arrayDimensions: dimensions } : {}),
+      };
       const inspection: VariableNodeInspection = {
         nodeId,
-        metadata,
+        metadata: resolvedMetadata,
         value,
         stale: false,
-        outOfRange: isOutOfRange(value.value, metadata?.range),
+        outOfRange: isOutOfRange(value.value, resolvedMetadata.range),
         updatedAt: dependencies.clock.now().toISOString(),
       };
       if (session === currentSession && state.connection.connectionGeneration === generation) {

@@ -164,6 +164,9 @@ describe("server routes", () => {
         identityStatus: "unverified",
       },
       nodes: [],
+      watchlist: [],
+      inspections: {},
+      trends: {},
     });
     server = await createServer({
       env: developmentEnvironment,
@@ -283,6 +286,101 @@ describe("server routes", () => {
       ).statusCode,
     ).toBe(200);
     expect(calls).toEqual(["connect", "read-only", "disconnect"]);
+  });
+
+  it("synchronizes Variable Node Inspection and restricts bounded Watchlist changes to the controller", async () => {
+    const watchlist: string[] = [];
+    const subscriptions = new Set<string>();
+    const inspections: Record<string, import("@ostudio/contracts").VariableNodeInspection> = {};
+    const snapshot = (): import("@ostudio/contracts").Snapshot => ({
+      sequence: 0,
+      buildVersion: "test",
+      generatedAt: new Date(0).toISOString(),
+      controller: { role: "controller", controllerGeneration: 0 },
+      safety: { readOnly: true, safetyGeneration: 1 },
+      connection: { state: "connected" },
+      nodes: [],
+      watchlist: [...watchlist],
+      inspections: { ...inspections },
+      trends: {},
+    });
+    server = await createServer({
+      env: developmentEnvironment,
+      controllerLeaseMilliseconds: 60_000,
+      runtime: {
+        snapshot,
+        inspectVariable: async ({ nodeId }) => {
+          inspections[nodeId] = {
+            nodeId,
+            metadata: { nodeId, dataType: "Double" },
+            liveValue: { displayValue: "12.5", status: "Good", stale: false },
+            stale: false,
+            outOfRange: false,
+          };
+        },
+        addToWatchlist: async ({ nodeId }) => {
+          if (watchlist.includes(nodeId)) return;
+          if (watchlist.length >= 100) throw { code: "watchlist_limit_reached" };
+          watchlist.push(nodeId);
+          subscriptions.add(nodeId);
+        },
+        removeFromWatchlist: async ({ nodeId }) => {
+          subscriptions.delete(nodeId);
+          const index = watchlist.indexOf(nodeId);
+          if (index >= 0) watchlist.splice(index, 1);
+        },
+      },
+    });
+    const login = async (): Promise<string> => {
+      const response = await server!.inject({
+        method: "POST",
+        url: "/api/v1/auth/login",
+        headers: { origin: "http://localhost:8080" },
+        payload: { username: "admin", password: "correct horse battery staple" },
+      });
+      return String(response.headers["set-cookie"]);
+    };
+    const controller = await login();
+    const observer = await login();
+    const post = (url: string, cookie: string, payload: object) =>
+      server!.inject({
+        method: "POST",
+        url,
+        headers: { origin: "http://localhost:8080", cookie },
+        payload,
+      });
+    await post("/api/v1/controller/attach", controller, {});
+    await post("/api/v1/controller/attach", observer, {});
+    expect(
+      (await post("/api/v1/variables/inspect?controllerGeneration=1", observer, { nodeId: "ns=2;s=level" })).statusCode,
+    ).toBe(409);
+    expect(
+      (await post("/api/v1/watchlist/add?controllerGeneration=1", observer, { nodeId: "ns=2;s=level" })).statusCode,
+    ).toBe(409);
+    const inspected = await post("/api/v1/variables/inspect?controllerGeneration=1", controller, {
+      nodeId: "ns=2;s=level",
+    });
+    expect(inspected.json()).toMatchObject({
+      inspections: { "ns=2;s=level": { liveValue: { displayValue: "12.5" } } },
+    });
+    const added = await post("/api/v1/watchlist/add?controllerGeneration=1", controller, { nodeId: "ns=2;s=level" });
+    expect(added.json()).toMatchObject({ watchlist: ["ns=2;s=level"] });
+    expect(subscriptions.has("ns=2;s=level")).toBe(true);
+    await post("/api/v1/watchlist/remove?controllerGeneration=1", controller, { nodeId: "ns=2;s=level" });
+    expect(watchlist).toEqual([]);
+    expect(subscriptions.has("ns=2;s=level")).toBe(false);
+    for (let index = 0; index < 100; index += 1) {
+      const response = await post("/api/v1/watchlist/add?controllerGeneration=1", controller, {
+        nodeId: `ns=2;s=level-${index}`,
+      });
+      expect(response.statusCode).toBe(200);
+    }
+    const overLimit = await post("/api/v1/watchlist/add?controllerGeneration=1", controller, {
+      nodeId: "ns=2;s=level-over-limit",
+    });
+    expect(overLimit.statusCode).toBe(409);
+    expect(overLimit.json()).toMatchObject({ code: "watchlist_limit_reached" });
+    expect(watchlist).toHaveLength(100);
   });
 
   it("revokes an in-flight connection before takeover and fences its response", async () => {
@@ -905,6 +1003,47 @@ describe("server routes", () => {
         })
       ).statusCode,
     ).toBe(409);
+  });
+
+  it("validates native EventSource attachments without weakening origin checks", async () => {
+    server = await createServer({ env: developmentEnvironment });
+    const login = await server.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { origin: "http://localhost:8080" },
+      payload: { username: "admin", password: "correct horse battery staple" },
+    });
+    const cookie = String(login.headers["set-cookie"]);
+    const eventRequest = (headers: Record<string, string>) =>
+      server!.inject({ method: "GET", url: "/api/v1/events?afterSequence=0", headers: { cookie, ...headers } });
+
+    const rejectedHeaders: Array<Record<string, string>> = [
+      { origin: "https://evil.example", "sec-fetch-site": "same-origin", host: "localhost:8080" },
+      { origin: "null", "sec-fetch-site": "same-origin", host: "localhost:8080" },
+      { "sec-fetch-site": "cross-site", host: "localhost:8080" },
+      { "sec-fetch-site": "same-site", host: "localhost:8080" },
+      { host: "localhost:8080" },
+      { "sec-fetch-site": "same-origin", host: "evil.example" },
+    ];
+    for (const headers of rejectedHeaders) {
+      expect((await eventRequest(headers)).statusCode).toBe(403);
+    }
+    expect(
+      (
+        await server.inject({
+          method: "POST",
+          url: "/api/v1/auth/logout",
+          headers: { cookie },
+        })
+      ).statusCode,
+    ).toBe(403);
+
+    const accepted = eventRequest({ "sec-fetch-site": "same-origin", host: "localhost:8080" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await server.shutdown();
+    const response = await accepted;
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain('"type":"snapshot-required"');
   });
 
   it("uses server-owned event sequences and emits a gap resynchronization", async () => {

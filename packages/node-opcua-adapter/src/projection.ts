@@ -278,18 +278,17 @@ export function projectQualifiedName(value: { namespaceIndex: number; name?: str
 }
 
 export function projectNodeClass(nodeClass: number): OpcUaNodeClass {
-  const name = [
-    "Unspecified",
-    "Object",
-    "Variable",
-    "Method",
-    "ObjectType",
-    "VariableType",
-    "ReferenceType",
-    "DataType",
-    "View",
-  ];
-  return (name[Math.log2(nodeClass)] as OpcUaNodeClass) ?? "Unspecified";
+  const classes: Record<number, OpcUaNodeClass> = {
+    1: "Object",
+    2: "Variable",
+    4: "Method",
+    8: "ObjectType",
+    16: "VariableType",
+    32: "ReferenceType",
+    64: "DataType",
+    128: "View",
+  };
+  return classes[nodeClass] ?? "Unspecified";
 }
 
 export function projectReference(reference: {

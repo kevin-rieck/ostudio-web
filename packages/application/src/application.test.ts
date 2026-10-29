@@ -568,6 +568,51 @@ describe("application facade", () => {
     expect(application.snapshot().watchlist).toEqual(["ns=2;s=one", "ns=2;s=two"]);
   });
 
+  it("keeps only 500 Session Trend points and tears down Watchlist subscriptions", async () => {
+    let handler: ((value: OpcUaDataValue) => void) | undefined;
+    let unsubscribeCalls = 0;
+    const opcua = client();
+    opcua.connect = async () => ({
+      ...(await client().connect({ endpointUrl: "opc.tcp://plc:4840" })),
+      subscribe: async (_request, next) => {
+        handler = next;
+        return {
+          unsubscribe: async () => {
+            unsubscribeCalls += 1;
+          },
+        };
+      },
+    });
+    const application = createApplication({
+      clientFactory: () => opcua,
+      savedConnections: store,
+      clock: { now: () => new Date("2026-01-01T00:00:00.000Z") },
+      events: { publish: () => undefined },
+    });
+    await application.connect({ endpointUrl: "opc.tcp://plc:4840" });
+    await application.addToWatchlist("ns=2;s=level");
+    await application.subscribe("ns=2;s=level");
+    for (let index = 0; index < 501; index += 1) {
+      handler?.({
+        status: { name: "Good", value: 0 },
+        value: { dataType: "Double", arrayType: "Scalar", value: index },
+        sourceTimestamp: new Date(index * 1_000).toISOString(),
+      });
+    }
+    expect(application.snapshot().trends["ns=2;s=level"]).toHaveLength(500);
+    expect(application.getTrend("ns=2;s=level")[0]?.value).toBe(1);
+    expect(application.getTrend("ns=2;s=level").at(-1)?.value).toBe(500);
+    await application.unsubscribe("ns=2;s=level");
+    handler?.({
+      status: { name: "Good", value: 0 },
+      value: { dataType: "Double", arrayType: "Scalar", value: 501 },
+    });
+    await application.removeFromWatchlist("ns=2;s=level");
+    expect(unsubscribeCalls).toBe(1);
+    expect(application.snapshot().watchlist).toEqual([]);
+    expect(application.getTrend("ns=2;s=level")).toHaveLength(500);
+  });
+
   it("marks an inspected value stale after loss and reports range violations", async () => {
     let lost = (): void => undefined;
     const opcua = client();

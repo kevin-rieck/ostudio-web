@@ -1,7 +1,14 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { MessageSecurityMode, OPCUACertificateManager, OPCUAServer, SecurityPolicy } from "node-opcua";
+import {
+  DataType,
+  MessageSecurityMode,
+  OPCUACertificateManager,
+  OPCUAServer,
+  SecurityPolicy,
+  Variant,
+} from "node-opcua";
 
 export type OpcUaTestServer = {
   server: OPCUAServer;
@@ -46,6 +53,27 @@ export async function createOpcUaTestServer(
     await rm(temporaryDirectory, { recursive: true, force: true });
     throw error;
   }
+}
+
+export function addOpcUaTestVariable(
+  fixture: OpcUaTestServer,
+  options: { browseName: string; nodeId: string; initialValue: number },
+): { setValue(value: number): void } {
+  const addressSpace = fixture.server.engine.addressSpace!;
+  const namespace = addressSpace.getOwnNamespace();
+  let value = options.initialValue;
+  namespace.addVariable({
+    organizedBy: addressSpace.rootFolder.objects,
+    browseName: options.browseName,
+    nodeId: options.nodeId,
+    dataType: DataType.Double,
+    value: { get: () => new Variant({ dataType: DataType.Double, value }) },
+  });
+  return {
+    setValue: (next) => {
+      value = next;
+    },
+  };
 }
 
 export async function disposeOpcUaTestServer(fixture: OpcUaTestServer): Promise<void> {
