@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { VariableObservation } from "./VariableObservation.js";
 import {
   ApiClientError,
   createApiClient,
@@ -29,6 +30,7 @@ export function App() {
   const [browseNodeId, setBrowseNodeId] = useState("i=84");
   const [searchQuery, setSearchQuery] = useState("");
   const [working, setWorking] = useState(false);
+  const eventStreamHealthy = useRef(false);
   const controllerControls = useRef<{ setGeneration(generation: number): void; startRenewal(): void } | undefined>(
     undefined,
   );
@@ -44,6 +46,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    eventStreamHealthy.current = false;
     if (!authenticated) {
       setSnapshot(undefined);
       setResynchronizing(false);
@@ -52,16 +55,43 @@ export function App() {
     }
     let stopped = false;
     let connecting = false;
+    let reconnectRequested = false;
     let source: EventSource | undefined;
     let renewTimer: number | undefined;
     let retryTimer: number | undefined;
     let controllerGeneration: number | undefined;
+    let snapshotRevision = 0;
+    let refreshPromise: Promise<Snapshot> | undefined;
     const stopRenewal = (): void => {
       if (renewTimer !== undefined) window.clearInterval(renewTimer);
       renewTimer = undefined;
     };
     const markValuesStale = (): void => {
       setResynchronizing(true);
+    };
+    const refreshSnapshot = (): Promise<Snapshot> => {
+      snapshotRevision += 1;
+      if (refreshPromise) return refreshPromise;
+      const refresh = async (): Promise<Snapshot> => {
+        while (!stopped) {
+          const revision = snapshotRevision;
+          const [current, report] = await Promise.all([api.getSnapshot(), api.getDiagnosticReport()]);
+          if (stopped) return current;
+          if (revision !== snapshotRevision) continue;
+          setDiagnostics(report);
+          setSnapshot(current);
+          if (eventStreamHealthy.current && navigator.onLine) setResynchronizing(false);
+          controllerGeneration = current.controller.controllerGeneration;
+          if (current.controller.role === "controller") startRenewal();
+          else stopRenewal();
+          return current;
+        }
+        return api.getSnapshot();
+      };
+      refreshPromise = refresh().finally(() => {
+        refreshPromise = undefined;
+      });
+      return refreshPromise;
     };
     const startRenewal = (): void => {
       if (controllerGeneration === undefined || renewTimer !== undefined) return;
@@ -73,18 +103,6 @@ export function App() {
         });
       }, 5_000);
     };
-    const refreshSnapshot = async (): Promise<Snapshot> => {
-      const [current, report] = await Promise.all([api.getSnapshot(), api.getDiagnosticReport()]);
-      if (!stopped) {
-        setDiagnostics(report);
-        setSnapshot(current);
-        setResynchronizing(false);
-        controllerGeneration = current.controller.controllerGeneration;
-        if (current.controller.role === "controller") startRenewal();
-        else stopRenewal();
-      }
-      return current;
-    };
     const retry = (): void => {
       if (!stopped && retryTimer === undefined)
         retryTimer = window.setTimeout(() => {
@@ -93,21 +111,38 @@ export function App() {
         }, 1_000);
     };
     const connectEvents = async (): Promise<void> => {
-      if (stopped || connecting) return;
+      if (stopped) return;
+      if (connecting) {
+        reconnectRequested = true;
+        return;
+      }
       connecting = true;
+      eventStreamHealthy.current = false;
       try {
         const current = await refreshSnapshot();
         if (stopped) return;
         source?.close();
         const eventSource = new EventSource(`/api/v1/events?afterSequence=${current.sequence}`);
         source = eventSource;
-        eventSource.onmessage = () => {
-          markValuesStale();
+        eventSource.onopen = () => {
+          if (source !== eventSource) return;
+          eventStreamHealthy.current = true;
           void refreshSnapshot().catch(retry);
         };
+        eventSource.onmessage = (event) => {
+          if (source !== eventSource) return;
+          const envelope = JSON.parse(event.data) as { type: string; payload: { reason?: string } };
+          if (envelope.type === "snapshot-required" && envelope.payload.reason === "gap") markValuesStale();
+          void refreshSnapshot().catch(() => {
+            markValuesStale();
+            retry();
+          });
+        };
         eventSource.onerror = () => {
+          if (source !== eventSource) return;
           eventSource.close();
-          if (source === eventSource) source = undefined;
+          source = undefined;
+          eventStreamHealthy.current = false;
           markValuesStale();
           retry();
         };
@@ -115,15 +150,21 @@ export function App() {
         retry();
       } finally {
         connecting = false;
+        if (reconnectRequested) {
+          reconnectRequested = false;
+          void connectEvents();
+        }
       }
     };
     const onOffline = (): void => {
+      eventStreamHealthy.current = false;
       markValuesStale();
       source?.close();
       source = undefined;
       retry();
     };
     const onOnline = (): void => {
+      eventStreamHealthy.current = false;
       markValuesStale();
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       retryTimer = undefined;
@@ -150,6 +191,7 @@ export function App() {
       });
     return () => {
       stopped = true;
+      eventStreamHealthy.current = false;
       source?.close();
       stopRenewal();
       window.removeEventListener("offline", onOffline);
@@ -206,7 +248,7 @@ export function App() {
         snapshot!.controller.controllerGeneration,
       );
       setSnapshot(current);
-      setResynchronizing(false);
+      clearResynchronizing();
     }, "The OPC UA Server connection failed.");
   }
 
@@ -214,7 +256,7 @@ export function App() {
     await withWorking(async () => {
       const current = await api.disconnectOpcUa(snapshot!.controller.controllerGeneration);
       setSnapshot(current);
-      setResynchronizing(false);
+      clearResynchronizing();
       setSelectedNodeId(undefined);
       setDiscovery(undefined);
     }, "The OPC UA Server could not be disconnected.");
@@ -231,7 +273,7 @@ export function App() {
     await withWorking(async () => {
       await api.searchAddressSpace({ query: searchQuery }, snapshot!.controller.controllerGeneration);
       setSnapshot(await api.getSnapshot());
-      setResynchronizing(false);
+      clearResynchronizing();
     }, "Address Space Search failed.");
   }
 
@@ -240,7 +282,7 @@ export function App() {
     if (controllerRole !== "controller" || !snapshot) return;
     await withWorking(async () => {
       setSnapshot(await api.inspectVariable({ nodeId }, snapshot.controller.controllerGeneration));
-      setResynchronizing(false);
+      clearResynchronizing();
     }, "Variable Node Inspection failed.");
   }
 
@@ -248,7 +290,7 @@ export function App() {
     if (!snapshot) return;
     await withWorking(async () => {
       setSnapshot(await api.addToWatchlist({ nodeId }, snapshot.controller.controllerGeneration));
-      setResynchronizing(false);
+      clearResynchronizing();
     }, "The Variable Node could not be added to the Watchlist.");
   }
 
@@ -256,7 +298,7 @@ export function App() {
     if (!snapshot) return;
     await withWorking(async () => {
       setSnapshot(await api.removeFromWatchlist({ nodeId }, snapshot.controller.controllerGeneration));
-      setResynchronizing(false);
+      clearResynchronizing();
     }, "The Variable Node could not be removed from the Watchlist.");
   }
 
@@ -287,10 +329,9 @@ export function App() {
   }
 
   const selectedNode = snapshot?.nodes.find((node) => node.nodeId === selectedNodeId);
-  const selectedInspection = selectedNodeId ? snapshot?.inspections[selectedNodeId] : undefined;
-  const selectedLiveValue = selectedInspection?.liveValue ?? selectedNode?.liveValue;
-  const selectedTrend = selectedNodeId ? (snapshot?.trends[selectedNodeId] ?? []) : [];
-  const selectedIsWatched = selectedNodeId ? (snapshot?.watchlist.includes(selectedNodeId) ?? false) : false;
+  const clearResynchronizing = (): void => {
+    if (eventStreamHealthy.current && navigator.onLine) setResynchronizing(false);
+  };
 
   return (
     <main className="shell">
@@ -450,88 +491,18 @@ export function App() {
               )}
             </section>
           )}
-          {selectedNodeId && (
-            <section aria-labelledby="inspection-heading">
-              <h3 id="inspection-heading">Variable Node Inspection</h3>
-              <p>{selectedInspection?.metadata?.displayName?.text ?? selectedNode?.displayName ?? selectedNodeId}</p>
-              <dl>
-                <dt>Node identifier</dt>
-                <dd>{selectedNodeId}</dd>
-                <dt>Data type</dt>
-                <dd>{selectedInspection?.metadata?.dataType ?? "Unavailable"}</dd>
-                <dt>Value rank</dt>
-                <dd>{selectedInspection?.metadata?.valueRank ?? "Unavailable"}</dd>
-                <dt>Array dimensions</dt>
-                <dd>{selectedInspection?.metadata?.arrayDimensions?.join(" × ") ?? "Unavailable"}</dd>
-                <dt>Live Value</dt>
-                <dd>{selectedLiveValue?.displayValue ?? "No Live Value"}</dd>
-                <dt>Status</dt>
-                <dd>{selectedLiveValue?.status ?? "Unavailable"}</dd>
-                <dt>Source timestamp</dt>
-                <dd>{selectedLiveValue?.sourceTimestamp ?? "Not provided"}</dd>
-                <dt>Server timestamp</dt>
-                <dd>{selectedLiveValue?.serverTimestamp ?? "Not provided"}</dd>
-                <dt>Value freshness</dt>
-                <dd>{resynchronizing || selectedLiveValue?.stale ? "Stale Value" : "Current"}</dd>
-                <dt>Out-of-range state</dt>
-                <dd>
-                  {selectedInspection?.metadata?.range
-                    ? selectedLiveValue?.outOfRange
-                      ? "Out of range"
-                      : "Within range"
-                    : "Not reported (no engineering range metadata)"}
-                </dd>
-              </dl>
-              {controllerRole === "controller" && selectedInspection && !selectedIsWatched && (
-                <button
-                  type="button"
-                  onClick={() => void addToWatchlist(selectedNodeId)}
-                  disabled={working || snapshot?.connection.state !== "connected"}
-                >
-                  Add to Watchlist
-                </button>
-              )}
-              <h4>Session Trend</h4>
-              {selectedTrend.length ? (
-                <ol aria-label="Session Trend">
-                  {selectedTrend.map((point, index) => (
-                    <li key={`${point.timestamp}-${index}`}>
-                      {point.timestamp} · {point.displayValue} · {point.status}
-                    </li>
-                  ))}
-                </ol>
-              ) : (
-                <p>No Session Trend points yet.</p>
-              )}
-            </section>
-          )}
           {snapshot && (
-            <section aria-labelledby="watchlist-heading">
-              <h3 id="watchlist-heading">Watchlist</h3>
-              {snapshot.watchlist.length ? (
-                <ul>
-                  {snapshot.watchlist.map((nodeId) => {
-                    const node = snapshot.nodes.find((item) => item.nodeId === nodeId);
-                    const liveValue = snapshot.inspections[nodeId]?.liveValue ?? node?.liveValue;
-                    return (
-                      <li key={nodeId}>
-                        <button type="button" onClick={() => setSelectedNodeId(nodeId)}>
-                          {node?.displayName ?? nodeId}: {liveValue?.displayValue ?? "No Live Value"}
-                          {resynchronizing || liveValue?.stale ? " · Stale Value" : ""}
-                        </button>
-                        {controllerRole === "controller" && (
-                          <button type="button" onClick={() => void removeFromWatchlist(nodeId)} disabled={working}>
-                            Remove
-                          </button>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ul>
-              ) : (
-                <p>No Variable Nodes are in the Watchlist.</p>
-              )}
-            </section>
+            <VariableObservation
+              snapshot={snapshot}
+              selectedNodeId={selectedNodeId}
+              selectedNode={selectedNode}
+              resynchronizing={resynchronizing}
+              controllerRole={controllerRole}
+              working={working}
+              onSelect={setSelectedNodeId}
+              onAddToWatchlist={(nodeId) => void addToWatchlist(nodeId)}
+              onRemoveFromWatchlist={(nodeId) => void removeFromWatchlist(nodeId)}
+            />
           )}
           {diagnostics.length > 0 && (
             <section aria-label="Diagnostics">

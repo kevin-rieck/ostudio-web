@@ -4,6 +4,7 @@ import {
   ApplicationError,
   type ApplicationFacade,
   type ApplicationSnapshot,
+  type OpcUaDataType,
   type VariableNodeMetadata as ApplicationVariableNodeMetadata,
 } from "@ostudio/application";
 import { createNodeOpcuaAdapter } from "@ostudio/node-opcua-adapter";
@@ -25,6 +26,39 @@ function displayValue(value: unknown): string {
   } catch {
     return "Value unavailable";
   }
+}
+
+const standardDataTypes: Record<number, OpcUaDataType> = {
+  1: "Boolean",
+  2: "SByte",
+  3: "Byte",
+  4: "Int16",
+  5: "UInt16",
+  6: "Int32",
+  7: "UInt32",
+  8: "Int64",
+  9: "UInt64",
+  10: "Float",
+  11: "Double",
+  12: "String",
+  13: "DateTime",
+  14: "Guid",
+  15: "ByteString",
+  16: "XmlElement",
+  17: "NodeId",
+  18: "ExpandedNodeId",
+  19: "StatusCode",
+  20: "QualifiedName",
+  21: "LocalizedText",
+  22: "ExtensionObject",
+  23: "DataValue",
+  24: "Variant",
+  25: "DiagnosticInfo",
+};
+
+function variableDataType(value: unknown): OpcUaDataType | undefined {
+  const match = /^(?:ns=0;)?i=(\d+)$/.exec(String(value));
+  return match ? standardDataTypes[Number(match[1])] : undefined;
 }
 
 function snapshotForTransport(source: ApplicationSnapshot): Snapshot {
@@ -126,6 +160,14 @@ function snapshotForTransport(source: ApplicationSnapshot): Snapshot {
 
 export async function start(): Promise<void> {
   const serverRef: { current?: WebServer } = {};
+  let snapshotEventTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleSnapshotEvent = (): void => {
+    if (snapshotEventTimer !== undefined) return;
+    snapshotEventTimer = setTimeout(() => {
+      snapshotEventTimer = undefined;
+      serverRef.current?.publishEvent("snapshot-required", { reason: "reconnect" });
+    }, 50);
+  };
   const application: ApplicationFacade = createApplication({
     clock: { now: () => new Date() },
     events: {
@@ -134,22 +176,38 @@ export async function start(): Promise<void> {
           const record = event.snapshot.diagnostics.at(-1);
           if (record) serverRef.current?.recordConnectionDiagnostic(record);
         }
-        serverRef.current?.publishEvent("snapshot-required", { reason: "reconnect" });
+        scheduleSnapshotEvent();
       },
     },
     clientFactory: (options) => createNodeOpcuaAdapter(options),
     savedConnections: { list: async () => [], save: async () => undefined },
   });
   const inspectVariable = async (nodeId: string): Promise<void> => {
-    const nodeClassResult = await application.read({ nodeId, attributeId: 2 });
-    const nodeClass = Array.isArray(nodeClassResult) ? nodeClassResult[0] : nodeClassResult;
-    if (!nodeClass || nodeClass.dataValue.status.name !== "Good" || nodeClass.dataValue.value?.value !== 2) {
+    const attributes = await application.read([
+      { nodeId, attributeId: 2 },
+      { nodeId, attributeId: 14 },
+      { nodeId, attributeId: 15 },
+      { nodeId, attributeId: 16 },
+    ]);
+    const readResults = Array.isArray(attributes) ? attributes : [attributes];
+    const attributeValue = (attributeId: number): unknown => {
+      const result = readResults.find((item) => item.attributeId === attributeId);
+      return result?.dataValue.status.name === "Good" ? result.dataValue.value?.value : undefined;
+    };
+    if (attributeValue(2) !== 2) {
       throw new ApplicationError("invalid_request", "The selected node is not a readable Variable Node.");
     }
     const source = application.snapshot();
     const reference = source.browsed?.references.find((candidate) => candidate.nodeId === nodeId);
     const result = source.search.results.find((candidate) => candidate.nodeId === nodeId);
-    const browseResult = await application.browse({ nodeId });
+    let browseResult;
+    try {
+      browseResult = await application.browse({ nodeId });
+    } catch (error) {
+      if (!(error instanceof ApplicationError) || error.code !== "browse_budget_exhausted") throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+      browseResult = await application.browse({ nodeId });
+    }
     const properties = browseResult.references.filter((candidate) =>
       ["EURange", "EngineeringUnits"].includes(candidate.browseName.name ?? ""),
     );
@@ -174,9 +232,20 @@ export async function start(): Promise<void> {
       typeof unitsObject?.displayName === "object" && unitsObject.displayName !== null
         ? (unitsObject.displayName as Record<string, unknown>)
         : undefined;
+    const valueRank = attributeValue(15);
+    const arrayDimensions = attributeValue(16);
+    const dataType = variableDataType(attributeValue(14));
     const metadata: ApplicationVariableNodeMetadata = {
       nodeId,
       ...(reference ? { browseName: reference.browseName, displayName: reference.displayName } : {}),
+      ...(dataType ? { dataType } : {}),
+      ...(typeof valueRank === "number" && Number.isInteger(valueRank) && valueRank >= -3 ? { valueRank } : {}),
+      ...(Array.isArray(arrayDimensions) &&
+      arrayDimensions.length > 0 &&
+      arrayDimensions.length <= 16 &&
+      arrayDimensions.every((dimension) => Number.isSafeInteger(dimension) && dimension >= 0)
+        ? { arrayDimensions }
+        : {}),
       ...(!reference && result?.browseName ? { browseName: { namespaceIndex: 0, name: result.browseName } } : {}),
       ...(!reference && result?.displayName ? { displayName: { text: result.displayName } } : {}),
       ...(low !== undefined || high !== undefined
@@ -216,7 +285,11 @@ export async function start(): Promise<void> {
     },
     setReadOnly: (readOnly: true): Promise<void> => application.setReadOnly(readOnly),
     disconnect: (): Promise<void> => application.disconnect(),
-    close: (): Promise<void> => application.close(),
+    close: async (): Promise<void> => {
+      if (snapshotEventTimer !== undefined) clearTimeout(snapshotEventTimer);
+      snapshotEventTimer = undefined;
+      await application.close();
+    },
   };
   const server = await createServer({ runtime });
   serverRef.current = server;

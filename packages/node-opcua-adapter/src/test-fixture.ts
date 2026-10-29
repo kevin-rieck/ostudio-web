@@ -8,6 +8,7 @@ import {
   OPCUAServer,
   SecurityPolicy,
   Variant,
+  VariantArrayType,
 } from "node-opcua";
 
 export type OpcUaTestServer = {
@@ -57,18 +58,44 @@ export async function createOpcUaTestServer(
 
 export function addOpcUaTestVariable(
   fixture: OpcUaTestServer,
-  options: { browseName: string; nodeId: string; initialValue: number },
-): { setValue(value: number): void } {
+  options: {
+    browseName: string;
+    nodeId: string;
+    initialValue: number | number[];
+    valueRank?: number;
+    arrayDimensions?: number[];
+    engineeringRange?: { low: number; high: number };
+    engineeringUnit?: string;
+  },
+): { setValue(value: number | number[]): void } {
   const addressSpace = fixture.server.engine.addressSpace!;
   const namespace = addressSpace.getOwnNamespace();
   let value = options.initialValue;
-  namespace.addVariable({
+  const variableOptions = {
     organizedBy: addressSpace.rootFolder.objects,
     browseName: options.browseName,
     nodeId: options.nodeId,
     dataType: DataType.Double,
-    value: { get: () => new Variant({ dataType: DataType.Double, value }) },
-  });
+    ...(options.valueRank === undefined ? {} : { valueRank: options.valueRank }),
+    ...(options.arrayDimensions === undefined ? {} : { arrayDimensions: options.arrayDimensions }),
+    value: {
+      get: () =>
+        new Variant({
+          dataType: DataType.Double,
+          arrayType: Array.isArray(value) ? VariantArrayType.Array : VariantArrayType.Scalar,
+          value,
+        }),
+    },
+  };
+  if (options.engineeringRange) {
+    namespace.addAnalogDataItem({
+      ...variableOptions,
+      engineeringUnitsRange: options.engineeringRange,
+      ...(options.engineeringUnit ? { engineeringUnits: { displayName: options.engineeringUnit } } : {}),
+    });
+  } else {
+    namespace.addVariable(variableOptions);
+  }
   return {
     setValue: (next) => {
       value = next;

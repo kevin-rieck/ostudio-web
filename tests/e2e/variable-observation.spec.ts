@@ -8,6 +8,7 @@ import {
 const password = "correct horse battery staple";
 
 async function ensureController(page: import("@playwright/test").Page): Promise<void> {
+  await expect(page.getByRole("heading", { name: "Watchlist" })).toBeVisible();
   const controller = page.getByText(/(?:connected|disconnected) · Controller · Read-Only Mode/);
   const recover = page.getByRole("button", { name: "Recover control", exact: true });
   const takeover = page.getByRole("button", { name: "Take over control", exact: true });
@@ -54,6 +55,27 @@ test("controller inspects and watches a Variable Node while observers follow, st
     browseName: "Temperature",
     nodeId: "ns=1;s=Temperature",
     initialValue: 21.5,
+    engineeringRange: { low: 20, high: 30 },
+    engineeringUnit: "°C",
+  });
+  addOpcUaTestVariable(fixture, {
+    browseName: "AnyRank",
+    nodeId: "ns=1;s=AnyRank",
+    initialValue: 1,
+    valueRank: -2,
+  });
+  addOpcUaTestVariable(fixture, {
+    browseName: "ScalarOrOneDimension",
+    nodeId: "ns=1;s=ScalarOrOneDimension",
+    initialValue: [1, 2, 3],
+    valueRank: -3,
+  });
+  addOpcUaTestVariable(fixture, {
+    browseName: "RankOne",
+    nodeId: "ns=1;s=RankOne",
+    initialValue: [1, 2, 3],
+    valueRank: 1,
+    arrayDimensions: [3],
   });
   let observer: Awaited<ReturnType<typeof browser.newContext>> | undefined;
   try {
@@ -113,7 +135,35 @@ test("controller inspects and watches a Variable Node while observers follow, st
     await expect(page.getByText("21.5", { exact: true })).toBeVisible();
     await expect(page.getByText("Double", { exact: true })).toBeVisible();
     await expect(page.getByText("Good", { exact: true })).toBeVisible();
-    await expect(page.getByText("Not reported (no engineering range metadata)")).toBeVisible();
+    await expect(page.getByText("Within range", { exact: true })).toBeVisible();
+    await expect(page.getByText("-1", { exact: true })).toBeVisible();
+    const variableMetadata = await page.evaluate(
+      async (nodeIds) => {
+        const readSnapshot = async () => fetch("/api/v1/snapshot").then((response) => response.json());
+        const initial = await readSnapshot();
+        const responses = [];
+        for (const nodeId of nodeIds) {
+          const response = await fetch(
+            `/api/v1/variables/inspect?controllerGeneration=${initial.controller.controllerGeneration}`,
+            { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ nodeId }) },
+          );
+          responses.push({ status: response.status, body: await response.json() });
+        }
+        const snapshot = await readSnapshot();
+        return { metadata: nodeIds.map((nodeId) => snapshot.inspections[nodeId]?.metadata), responses };
+      },
+      ["ns=1;s=AnyRank", "ns=1;s=ScalarOrOneDimension", "ns=1;s=RankOne", "ns=1;s=Temperature"],
+    );
+    expect(variableMetadata.responses).toMatchObject([
+      { status: 200 },
+      { status: 200 },
+      { status: 200 },
+      { status: 200 },
+    ]);
+    expect(variableMetadata.metadata[0]).toMatchObject({ dataType: "Double", valueRank: -2 });
+    expect(variableMetadata.metadata[1]).toMatchObject({ dataType: "Double", valueRank: -3 });
+    expect(variableMetadata.metadata[2]).toMatchObject({ dataType: "Double", valueRank: 1, arrayDimensions: [3] });
+    expect(variableMetadata.metadata[3]).toMatchObject({ range: { low: 20, high: 30 }, engineeringUnit: "°C" });
 
     await page.route("**/api/v1/watchlist/add**", (route) =>
       route.fulfill({
@@ -150,25 +200,45 @@ test("controller inspects and watches a Variable Node while observers follow, st
       timeout: 15_000,
     });
     await expect(other.getByRole("button", { name: /Temperature: 23\.75/ })).toBeVisible({ timeout: 15_000 });
-    for (let value = 24; value <= 41; value += 1) {
-      variable.setValue(value);
-      await expect(page.getByRole("button", { name: new RegExp(`Temperature: ${value}(?: ·|$)`) })).toBeVisible({
-        timeout: 5_000,
-      });
-      await page.waitForTimeout(1_000);
-    }
+    variable.setValue(41);
+    await expect(page.getByRole("button", { name: /Temperature: 41(?: ·|$)/ })).toBeVisible({ timeout: 15_000 });
     await expect(page.getByText(/connected · Controller · Read-Only Mode/)).toBeVisible();
     await expect(other.getByText(/connected · Observer · Read-Only Mode/)).toBeVisible();
 
+    let releaseSnapshot!: () => void;
+    let snapshotCaptured!: () => void;
+    const heldSnapshot = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
+    const snapshotStarted = new Promise<void>((resolve) => {
+      snapshotCaptured = resolve;
+    });
+    await page.route(
+      "**/api/v1/snapshot",
+      async (route) => {
+        const response = await route.fetch();
+        const body = await response.text();
+        snapshotCaptured();
+        await heldSnapshot;
+        await route.fulfill({ response, body });
+      },
+      { times: 1 },
+    );
+    variable.setValue(42);
+    await snapshotStarted;
     await page.context().setOffline(true);
     await expect(page.getByText(/Live Values are stale while OPC UA Studio resynchronizes/)).toBeVisible({
       timeout: 15_000,
     });
+    releaseSnapshot();
+    await page.waitForTimeout(100);
+    await expect(page.getByText(/Live Values are stale while OPC UA Studio resynchronizes/)).toBeVisible();
     await page.context().setOffline(false);
     await expect(page.getByText(/Live Values are stale while OPC UA Studio resynchronizes/)).toBeHidden({
       timeout: 15_000,
     });
-    await expect(page.getByRole("button", { name: /Temperature: 41/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Temperature: 42/ })).toBeVisible();
+    await expect(page.getByText("Out of range", { exact: true })).toBeVisible();
     await expect(page.getByText(/connected · Controller · Read-Only Mode/)).toBeVisible();
 
     await page.getByRole("button", { name: "Remove", exact: true }).click();

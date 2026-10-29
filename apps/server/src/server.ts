@@ -355,20 +355,20 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   const sendEvent = (client: EventClient, event: EventEnvelope): void => {
     if (client.closed) return;
     if (client.paused) {
-      if (event.type === "live-value-changed") {
-        const nodeId = "nodeId" in event.payload ? event.payload.nodeId : undefined;
-        const index =
-          nodeId === undefined
-            ? -1
-            : client.queue.findIndex(
-                (queued) =>
-                  queued.type === event.type && "nodeId" in queued.payload && queued.payload.nodeId === nodeId,
-              );
-        if (index >= 0) {
-          client.queue.splice(index, 1);
-          client.queue.push(event);
-          return;
-        }
+      const nodeId = "nodeId" in event.payload ? event.payload.nodeId : undefined;
+      const index = client.queue.findIndex((queued) => {
+        if (event.type === "snapshot-required") return queued.type === event.type;
+        return (
+          event.type === "live-value-changed" &&
+          queued.type === event.type &&
+          "nodeId" in queued.payload &&
+          queued.payload.nodeId === nodeId
+        );
+      });
+      if (index >= 0) {
+        client.queue.splice(index, 1);
+        client.queue.push(event);
+        return;
       }
       if (client.queue.length >= SSE_QUEUE_LIMIT) {
         closeEventClient(client);
@@ -963,14 +963,17 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     client.heartbeat.unref();
     eventClients.add(client);
     reply.raw.on("drain", () => flushEventClient(client));
+    client.paused = !client.response.write(": connected\n\n");
     const oldest = eventHistory[0]?.sequence;
     if (after === 0) {
       publishEvent("snapshot-required", { reason: "initial" });
     } else if (after > sequence || (after < sequence && (oldest === undefined || after < oldest - 1))) {
       publishEvent("snapshot-required", { reason: "gap" });
     } else {
-      for (const event of eventHistory) {
-        if (event.sequence > after) sendEvent(client, event);
+      const replay = eventHistory.filter((event) => event.sequence > after);
+      const latestSnapshotRequired = replay.filter((event) => event.type === "snapshot-required").at(-1);
+      for (const event of replay) {
+        if (event.type !== "snapshot-required" || event === latestSnapshotRequired) sendEvent(client, event);
       }
     }
     const close = (): void => closeEventClient(client);
