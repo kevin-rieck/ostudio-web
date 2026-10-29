@@ -56,8 +56,6 @@ export function App() {
     let renewTimer: number | undefined;
     let retryTimer: number | undefined;
     let controllerGeneration: number | undefined;
-    let latestSequence = 0;
-    let buildVersion: string | undefined;
     const stopRenewal = (): void => {
       if (renewTimer !== undefined) window.clearInterval(renewTimer);
       renewTimer = undefined;
@@ -81,8 +79,6 @@ export function App() {
         setDiagnostics(report);
         setSnapshot(current);
         setResynchronizing(false);
-        latestSequence = current.sequence;
-        buildVersion = current.buildVersion;
         controllerGeneration = current.controller.controllerGeneration;
         if (current.controller.role === "controller") startRenewal();
         else stopRenewal();
@@ -105,22 +101,8 @@ export function App() {
         source?.close();
         const eventSource = new EventSource(`/api/v1/events?afterSequence=${current.sequence}`);
         source = eventSource;
-        eventSource.onmessage = (message) => {
+        eventSource.onmessage = () => {
           markValuesStale();
-          try {
-            const event = JSON.parse(message.data) as { sequence?: number; buildVersion?: string };
-            if (
-              event.buildVersion !== buildVersion ||
-              typeof event.sequence !== "number" ||
-              event.sequence !== latestSequence + 1
-            ) {
-              latestSequence = 0;
-            } else {
-              latestSequence = event.sequence;
-            }
-          } catch {
-            latestSequence = 0;
-          }
           void refreshSnapshot().catch(retry);
         };
         eventSource.onerror = () => {

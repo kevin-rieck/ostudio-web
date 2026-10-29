@@ -11,7 +11,6 @@ import type {
   AddressSpaceNode,
   BrowseResult,
   EndpointDiscoveryResult,
-  LiveValue,
   SearchResult,
   SessionTrendPoint,
   Snapshot,
@@ -59,7 +58,6 @@ function snapshotForTransport(source: ApplicationSnapshot): Snapshot {
       reference.displayName.text ?? reference.browseName.name ?? reference.nodeId,
     );
   }
-  const liveValues: Record<string, LiveValue> = {};
   const inspections: Record<string, VariableNodeInspection> = {};
   for (const [nodeId, inspection] of Object.entries(source.inspections)) {
     const liveValue = inspection.value
@@ -72,17 +70,9 @@ function snapshotForTransport(source: ApplicationSnapshot): Snapshot {
           ...(inspection.metadata?.range ? { outOfRange: inspection.outOfRange } : {}),
         }
       : undefined;
-    if (liveValue) liveValues[nodeId] = liveValue;
-    const metadata = inspection.metadata
-      ? {
-          ...inspection.metadata,
-          ...(inspection.metadata.browseName ? { browseName: inspection.metadata.browseName } : {}),
-          ...(inspection.metadata.displayName ? { displayName: inspection.metadata.displayName } : {}),
-        }
-      : undefined;
     inspections[nodeId] = {
       nodeId,
-      ...(metadata ? { metadata } : {}),
+      ...(inspection.metadata ? { metadata: inspection.metadata } : {}),
       ...(liveValue ? { liveValue } : {}),
       stale: inspection.stale,
       outOfRange: inspection.outOfRange,

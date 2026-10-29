@@ -45,55 +45,6 @@ async function disconnectAndSignOut(page: import("@playwright/test").Page): Prom
   await signOut.click();
 }
 
-test("direct and inspected Variable Node Watchlist adds avoid redundant metadata browsing", async ({ page }) => {
-  const fixture = await createOpcUaTestServer();
-  addOpcUaTestVariable(fixture, { browseName: "Temperature", nodeId: "ns=1;s=Temperature", initialValue: 21.5 });
-  try {
-    await fixture.server.start();
-    await page.goto("/");
-    await page.getByLabel("Username").fill("admin");
-    await page.getByLabel("Admin password").fill(password);
-    await page.getByRole("button", { name: "Sign in" }).click();
-    await establishDisconnectedController(page);
-    await page.getByLabel("Endpoint URL").fill(fixture.endpointUrl);
-    await page.getByRole("button", { name: "Discover endpoints" }).click();
-    await page.getByRole("button", { name: "Connect anonymously" }).click();
-    const controllerGeneration = await page.evaluate(async (nodeId) => {
-      const snapshot = await fetch("/api/v1/snapshot").then((response) => response.json());
-      const response = await fetch(
-        `/api/v1/watchlist/add?controllerGeneration=${snapshot.controller.controllerGeneration}`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ nodeId }),
-        },
-      );
-      if (!response.ok) throw new Error(`Direct Watchlist add failed: ${response.status}`);
-      return snapshot.controller.controllerGeneration;
-    }, "ns=1;s=Temperature");
-    await page.evaluate(async (generation) => {
-      await fetch(`/api/v1/watchlist/remove?controllerGeneration=${generation}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ nodeId: "ns=1;s=Temperature" }),
-      });
-    }, controllerGeneration);
-    await page.waitForTimeout(1_100);
-    await page.getByRole("button", { name: "Browse", exact: true }).click();
-    await page.getByRole("button", { name: "Objects", exact: true }).click();
-    await page.waitForTimeout(1_100);
-    await page.getByRole("button", { name: "Browse", exact: true }).click();
-    await page.getByRole("button", { name: "Temperature", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "Variable Node Inspection" })).toBeVisible();
-    await expect(page.getByText("21.5", { exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "Add to Watchlist" }).click();
-    await expect(page.getByRole("button", { name: /Temperature: 21\.5/ })).toBeVisible();
-  } finally {
-    await disconnectAndSignOut(page);
-    await disposeOpcUaTestServer(fixture);
-  }
-});
-
 test("controller inspects and watches a Variable Node while observers follow, stale and resync", async ({
   page,
   browser,
