@@ -546,7 +546,9 @@ describe("application facade", () => {
     });
     await application.connect({ endpointUrl: "opc.tcp://plc:4840" });
     const pending = Promise.all(
-      Array.from({ length: 5 }, (_, index) => application.inspectVariable(`ns=2;s=level-${index}`)),
+      Array.from({ length: 5 }, (_, index) =>
+        application.inspectVariable(`ns=2;s=level-${index}`, { nodeId: `ns=2;s=level-${index}` }),
+      ),
     );
     for (let attempt = 0; attempt < 10 && maximum < 2; attempt += 1) await Promise.resolve();
     expect(maximum).toBe(2);
@@ -595,7 +597,7 @@ describe("application facade", () => {
       events: { publish: () => undefined },
     });
     await application.connect({ endpointUrl: "opc.tcp://plc:4840" });
-    const inspection = await application.inspectVariable("ns=2;s=array");
+    const inspection = await application.inspectVariable("ns=2;s=array", { nodeId: "ns=2;s=array" });
     expect(inspection.metadata).toMatchObject({ dataType: "Double" });
     expect(inspection.metadata).not.toHaveProperty("valueRank");
     expect(inspection.metadata).not.toHaveProperty("arrayDimensions");
@@ -611,18 +613,257 @@ describe("application facade", () => {
     });
     await application.connect({ endpointUrl: "opc.tcp://plc:4840" });
     for (const nodeId of ["ns=2;s=watched-one", "ns=2;s=watched-two"]) {
-      await application.inspectVariable(nodeId);
+      await application.inspectVariable(nodeId, { nodeId });
       await application.addToWatchlist(nodeId);
     }
-    for (let index = 0; index < 105; index += 1) await application.inspectVariable(`ns=2;s=inspection-${index}`);
-    await application.inspectVariable("ns=2;s=watched-one");
-    await application.inspectVariable("ns=2;s=inspection-105");
+    for (let index = 0; index < 105; index += 1)
+      await application.inspectVariable(`ns=2;s=inspection-${index}`, { nodeId: `ns=2;s=inspection-${index}` });
+    await application.inspectVariable("ns=2;s=watched-one", { nodeId: "ns=2;s=watched-one" });
+    await application.inspectVariable("ns=2;s=inspection-105", { nodeId: "ns=2;s=inspection-105" });
     const inspections = application.snapshot().inspections;
     expect(Object.keys(inspections)).toHaveLength(100);
     expect(inspections).toHaveProperty("ns=2;s=inspection-105");
     expect(inspections).toHaveProperty("ns=2;s=watched-one");
     expect(inspections).toHaveProperty("ns=2;s=watched-two");
     expect(inspections).not.toHaveProperty("ns=2;s=inspection-0");
+  });
+
+  it("retains all 100 watched inspections and the focused node across subscription updates", async () => {
+    const handlers = new Map<string, (value: OpcUaDataValue) => void>();
+    const opcua = client();
+    const connect = opcua.connect;
+    opcua.connect = async (request) => ({
+      ...(await connect(request)),
+      subscribe: async ({ nodeId }, handler) => {
+        handlers.set(nodeId, handler);
+        return { unsubscribe: async () => undefined };
+      },
+    });
+    const application = createApplication({
+      clientFactory: () => opcua,
+      savedConnections: store,
+      clock: { now: () => new Date("2026-01-01T00:00:00.000Z") },
+      events: { publish: () => undefined },
+    });
+    await application.connect({ endpointUrl: "opc.tcp://plc:4840" });
+    for (let index = 0; index < 100; index += 1) {
+      const nodeId = `watched-${index}`;
+      await application.inspectVariable(nodeId, { nodeId, range: { high: 10 } });
+      await application.addToWatchlist(nodeId);
+      await application.subscribe(nodeId);
+    }
+    for (let index = 0; index < 5; index += 1) {
+      const nodeId = `focused-${index}`;
+      await application.inspectVariable(nodeId, { nodeId });
+    }
+    handlers.get("watched-0")?.({
+      status: { name: "Good", value: 0 },
+      value: { dataType: "Double", arrayType: "Scalar", value: 20 },
+    });
+    const inspections = application.snapshot().inspections;
+    expect(Object.keys(inspections)).toHaveLength(101);
+    for (let index = 0; index < 100; index += 1) expect(inspections).toHaveProperty(`watched-${index}`);
+    expect(inspections).toHaveProperty("focused-4");
+    expect(inspections).not.toHaveProperty("focused-0");
+    expect(inspections["watched-0"]).toMatchObject({ value: { value: { value: 20 } }, outOfRange: true });
+  });
+
+  it("validates and inspects Variable Node attributes and engineering properties, retrying rate-limited browsing", async () => {
+    let now = Date.parse("2026-01-01T00:00:00.000Z");
+    let nodeClass = 2;
+    let badNodeClassStatus = false;
+    let invalidMetadata = false;
+    let browseFailure = false;
+    const reads: OpcUaReadRequest[][] = [];
+    const browses: string[] = [];
+    const delays: number[] = [];
+    const opcua = client();
+    const connect = opcua.connect;
+    opcua.connect = async (request) => ({
+      ...(await connect(request)),
+      browse: async ({ nodeId }) => {
+        browses.push(nodeId);
+        if (browseFailure) throw new Error("browse failed");
+        const names = nodeId === "parent" ? ["level"] : ["EURange", "EngineeringUnits"];
+        return {
+          nodeId,
+          references: names.map((name) => ({
+            nodeId: name,
+            browseName: { namespaceIndex: 2, name },
+            displayName: { text: name === "level" ? "Tank level" : name },
+            nodeClass: "Variable" as const,
+            isForward: true,
+          })),
+          status: { name: "Good", value: 0 },
+          requests: 1,
+          truncated: false,
+        };
+      },
+      read: (async (request: OpcUaReadRequest | OpcUaReadRequest[]) => {
+        const items = Array.isArray(request) ? request : [request];
+        reads.push(items);
+        const results = items.map((item) => {
+          const attributeId = item.attributeId ?? 13;
+          const value =
+            item.nodeId === "EURange"
+              ? invalidMetadata
+                ? { low: "bad", high: 10 }
+                : { low: 0, high: 10 }
+              : item.nodeId === "EngineeringUnits"
+                ? invalidMetadata
+                  ? { displayName: { text: 123 } }
+                  : { displayName: { text: "bar" } }
+                : attributeId === 2
+                  ? nodeClass
+                  : attributeId === 14
+                    ? invalidMetadata
+                      ? "ns=2;i=11"
+                      : "i=11"
+                    : attributeId === 15
+                      ? invalidMetadata
+                        ? -4
+                        : 1
+                      : attributeId === 16
+                        ? invalidMetadata
+                          ? [3, -1]
+                          : [3]
+                        : 12;
+          return {
+            ...item,
+            attributeId,
+            dataValue: {
+              status: { name: attributeId === 2 && badNodeClassStatus ? "Bad" : "Good", value: 0 },
+              value: { dataType: "Double" as const, arrayType: "Scalar" as const, value },
+            },
+          };
+        });
+        return Array.isArray(request) ? results : results[0]!;
+      }) as OpcUaSession["read"],
+    });
+    const application = createApplication({
+      clientFactory: () => opcua,
+      savedConnections: store,
+      clock: { now: () => new Date(now) },
+      timers: {
+        setTimeout: (callback, delay) => {
+          delays.push(delay);
+          now += delay;
+          callback();
+          return 0;
+        },
+        clearTimeout: () => undefined,
+      },
+      events: { publish: () => undefined },
+    });
+    await application.connect({ endpointUrl: "opc.tcp://plc:4840" });
+    await application.browse({ nodeId: "parent" });
+    const inspection = await application.inspectVariable("level");
+    expect(delays).toEqual([1_000]);
+    expect(browses).toEqual(["parent", "level"]);
+    expect(reads.map((items) => items.map((item) => [item.nodeId, item.attributeId ?? 13]))).toEqual([
+      [
+        ["level", 2],
+        ["level", 14],
+        ["level", 15],
+        ["level", 16],
+      ],
+      [
+        ["EURange", 13],
+        ["EngineeringUnits", 13],
+      ],
+      [["level", 13]],
+    ]);
+    expect(inspection).toMatchObject({
+      metadata: {
+        browseName: { namespaceIndex: 2, name: "level" },
+        displayName: { text: "Tank level" },
+        dataType: "Double",
+        valueRank: 1,
+        arrayDimensions: [3],
+        range: { low: 0, high: 10 },
+        engineeringUnit: "bar",
+      },
+      outOfRange: true,
+    });
+    nodeClass = 1;
+    await expect(application.inspectVariable("level")).rejects.toMatchObject({ code: "invalid_request" });
+    nodeClass = 2;
+    badNodeClassStatus = true;
+    await expect(application.inspectVariable("level")).rejects.toMatchObject({ code: "invalid_request" });
+    expect(browses).toEqual(["parent", "level"]);
+    badNodeClassStatus = false;
+    invalidMetadata = true;
+    now += 1_000;
+    const invalid = await application.inspectVariable("level");
+    expect(invalid.metadata).toMatchObject({ dataType: "Double", range: { high: 10 } });
+    expect(invalid.metadata).not.toHaveProperty("valueRank");
+    expect(invalid.metadata).not.toHaveProperty("arrayDimensions");
+    expect(invalid.metadata).not.toHaveProperty("engineeringUnit");
+    now += 1_000;
+    browseFailure = true;
+    await expect(application.inspectVariable("level")).rejects.toThrow("browse failed");
+    expect(delays).toEqual([1_000]);
+  });
+
+  it("does not retry inspection browsing on a replacement session", async () => {
+    let resume!: () => void;
+    let timerStarted!: () => void;
+    const timerReady = new Promise<void>((resolve) => {
+      timerStarted = resolve;
+    });
+    let connections = 0;
+    let replacementBrowses = 0;
+    const opcua = client();
+    const connect = opcua.connect;
+    opcua.connect = async (request) => {
+      const session = await connect(request);
+      connections += 1;
+      const isReplacement = connections > 1;
+      return {
+        ...session,
+        browse: async (browseRequest) => {
+          if (isReplacement) replacementBrowses += 1;
+          return session.browse(browseRequest);
+        },
+        read: (async (readRequest: OpcUaReadRequest | OpcUaReadRequest[]) => {
+          const items = Array.isArray(readRequest) ? readRequest : [readRequest];
+          const results = items.map((item) => ({
+            ...item,
+            attributeId: item.attributeId ?? 13,
+            dataValue: {
+              status: { name: "Good", value: 0 },
+              value: { dataType: "Int32" as const, arrayType: "Scalar" as const, value: 2 },
+            },
+          }));
+          return Array.isArray(readRequest) ? results : results[0]!;
+        }) as OpcUaSession["read"],
+      };
+    };
+    const application = createApplication({
+      clientFactory: () => opcua,
+      savedConnections: store,
+      clock: { now: () => new Date("2026-01-01T00:00:00.000Z") },
+      timers: {
+        setTimeout: (callback) => {
+          resume = callback;
+          timerStarted();
+          return 0;
+        },
+        clearTimeout: () => undefined,
+      },
+      events: { publish: () => undefined },
+    });
+    await application.connect({ endpointUrl: "opc.tcp://old:4840" });
+    await application.browse({ nodeId: "parent" });
+    const pending = application.inspectVariable("level");
+    const rejected = expect(pending).rejects.toMatchObject({ code: "connection_required" });
+    await timerReady;
+    await application.disconnect();
+    await application.connect({ endpointUrl: "opc.tcp://new:4840" });
+    resume();
+    await rejected;
+    expect(replacementBrowses).toBe(0);
+    expect(application.snapshot().inspections).toEqual({});
   });
 
   it("bounds Session Trend nodes and retains current Watchlist trends", async () => {
@@ -786,7 +1027,7 @@ describe("application facade", () => {
     });
     await application.connect({ endpointUrl: "opc.tcp://plc:4840" });
     await application.setReadOnly(false, true);
-    await application.inspectVariable("ns=2;s=level");
+    await application.inspectVariable("ns=2;s=level", { nodeId: "ns=2;s=level" });
     const pendingBrowse = application.browse({ nodeId: "i=85" });
     await browseEntered;
 
@@ -940,7 +1181,7 @@ describe("application facade", () => {
       events: { publish: () => undefined },
     });
     await application.connect({ endpointUrl: "opc.tcp://old:4840" });
-    const pendingInspection = application.inspectVariable("ns=2;s=old");
+    const pendingInspection = application.inspectVariable("ns=2;s=old", { nodeId: "ns=2;s=old" });
     await Promise.resolve();
     const pendingRead = application.read({ nodeId: "ns=2;s=queued" });
     const pendingReadAfterReconnect = application.read({ nodeId: "ns=2;s=queued-again" });
@@ -990,7 +1231,7 @@ describe("application facade", () => {
       events: { publish: () => undefined },
     });
     await application.connect({ endpointUrl: "opc.tcp://old:4840" });
-    const pendingInspection = application.inspectVariable("ns=2;s=old");
+    const pendingInspection = application.inspectVariable("ns=2;s=old", { nodeId: "ns=2;s=old" });
     await Promise.resolve();
     await application.disconnect();
     await application.connect({ endpointUrl: "opc.tcp://new:4840" });

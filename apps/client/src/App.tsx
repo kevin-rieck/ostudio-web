@@ -61,12 +61,14 @@ export function App() {
     let retryTimer: number | undefined;
     let controllerGeneration: number | undefined;
     let snapshotRevision = 0;
+    let interruptionRevision = 0;
     let refreshPromise: Promise<Snapshot> | undefined;
     const stopRenewal = (): void => {
       if (renewTimer !== undefined) window.clearInterval(renewTimer);
       renewTimer = undefined;
     };
     const markValuesStale = (): void => {
+      interruptionRevision += 1;
       setResynchronizing(true);
     };
     const refreshSnapshot = (): Promise<Snapshot> => {
@@ -75,16 +77,17 @@ export function App() {
       const refresh = async (): Promise<Snapshot> => {
         while (!stopped) {
           const revision = snapshotRevision;
+          const interruption = interruptionRevision;
           const [current, report] = await Promise.all([api.getSnapshot(), api.getDiagnosticReport()]);
           if (stopped) return current;
-          if (revision !== snapshotRevision) continue;
+          if (interruption !== interruptionRevision) continue;
           setDiagnostics(report);
           setSnapshot(current);
           if (eventStreamHealthy.current && navigator.onLine) setResynchronizing(false);
           controllerGeneration = current.controller.controllerGeneration;
           if (current.controller.role === "controller") startRenewal();
           else stopRenewal();
-          return current;
+          if (revision === snapshotRevision) return current;
         }
         return api.getSnapshot();
       };
@@ -117,11 +120,13 @@ export function App() {
         return;
       }
       connecting = true;
+      interruptionRevision += 1;
       eventStreamHealthy.current = false;
+      source?.close();
+      source = undefined;
       try {
         const current = await refreshSnapshot();
         if (stopped) return;
-        source?.close();
         const eventSource = new EventSource(`/api/v1/events?afterSequence=${current.sequence}`);
         source = eventSource;
         eventSource.onopen = () => {

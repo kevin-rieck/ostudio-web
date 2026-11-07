@@ -1,12 +1,5 @@
 import { pathToFileURL } from "node:url";
-import {
-  createApplication,
-  ApplicationError,
-  type ApplicationFacade,
-  type ApplicationSnapshot,
-  type OpcUaDataType,
-  type VariableNodeMetadata as ApplicationVariableNodeMetadata,
-} from "@ostudio/application";
+import { createApplication, type ApplicationFacade, type ApplicationSnapshot } from "@ostudio/application";
 import { createNodeOpcuaAdapter } from "@ostudio/node-opcua-adapter";
 import type {
   AddressSpaceNode,
@@ -26,39 +19,6 @@ function displayValue(value: unknown): string {
   } catch {
     return "Value unavailable";
   }
-}
-
-const standardDataTypes: Record<number, OpcUaDataType> = {
-  1: "Boolean",
-  2: "SByte",
-  3: "Byte",
-  4: "Int16",
-  5: "UInt16",
-  6: "Int32",
-  7: "UInt32",
-  8: "Int64",
-  9: "UInt64",
-  10: "Float",
-  11: "Double",
-  12: "String",
-  13: "DateTime",
-  14: "Guid",
-  15: "ByteString",
-  16: "XmlElement",
-  17: "NodeId",
-  18: "ExpandedNodeId",
-  19: "StatusCode",
-  20: "QualifiedName",
-  21: "LocalizedText",
-  22: "ExtensionObject",
-  23: "DataValue",
-  24: "Variant",
-  25: "DiagnosticInfo",
-};
-
-function variableDataType(value: unknown): OpcUaDataType | undefined {
-  const match = /^(?:ns=0;)?i=(\d+)$/.exec(String(value));
-  return match ? standardDataTypes[Number(match[1])] : undefined;
 }
 
 function snapshotForTransport(source: ApplicationSnapshot): Snapshot {
@@ -182,79 +142,6 @@ export async function start(): Promise<void> {
     clientFactory: (options) => createNodeOpcuaAdapter(options),
     savedConnections: { list: async () => [], save: async () => undefined },
   });
-  const inspectVariable = async (nodeId: string): Promise<void> => {
-    const attributes = await application.read([
-      { nodeId, attributeId: 2 },
-      { nodeId, attributeId: 14 },
-      { nodeId, attributeId: 15 },
-      { nodeId, attributeId: 16 },
-    ]);
-    const readResults = Array.isArray(attributes) ? attributes : [attributes];
-    const attributeValue = (attributeId: number): unknown => {
-      const result = readResults.find((item) => item.attributeId === attributeId);
-      return result?.dataValue.status.name === "Good" ? result.dataValue.value?.value : undefined;
-    };
-    if (attributeValue(2) !== 2) {
-      throw new ApplicationError("invalid_request", "The selected node is not a readable Variable Node.");
-    }
-    const source = application.snapshot();
-    const reference = source.browsed?.references.find((candidate) => candidate.nodeId === nodeId);
-    const result = source.search.results.find((candidate) => candidate.nodeId === nodeId);
-    let browseResult;
-    try {
-      browseResult = await application.browse({ nodeId });
-    } catch (error) {
-      if (!(error instanceof ApplicationError) || error.code !== "browse_budget_exhausted") throw error;
-      await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
-      browseResult = await application.browse({ nodeId });
-    }
-    const properties = browseResult.references.filter((candidate) =>
-      ["EURange", "EngineeringUnits"].includes(candidate.browseName.name ?? ""),
-    );
-    const propertyValues = properties.length
-      ? await application.read(properties.map((property) => ({ nodeId: property.nodeId })))
-      : [];
-    const readValues = Array.isArray(propertyValues) ? propertyValues : [propertyValues];
-    const propertyValue = (name: string): unknown => {
-      const index = properties.findIndex((property) => property.browseName.name === name);
-      return index >= 0 ? readValues[index]?.dataValue.value?.value : undefined;
-    };
-    const rangeValue = propertyValue("EURange");
-    const rangeObject =
-      typeof rangeValue === "object" && rangeValue !== null ? (rangeValue as Record<string, unknown>) : undefined;
-    const low = typeof rangeObject?.low === "number" && Number.isFinite(rangeObject.low) ? rangeObject.low : undefined;
-    const high =
-      typeof rangeObject?.high === "number" && Number.isFinite(rangeObject.high) ? rangeObject.high : undefined;
-    const unitsValue = propertyValue("EngineeringUnits");
-    const unitsObject =
-      typeof unitsValue === "object" && unitsValue !== null ? (unitsValue as Record<string, unknown>) : undefined;
-    const unitsDisplay =
-      typeof unitsObject?.displayName === "object" && unitsObject.displayName !== null
-        ? (unitsObject.displayName as Record<string, unknown>)
-        : undefined;
-    const valueRank = attributeValue(15);
-    const arrayDimensions = attributeValue(16);
-    const dataType = variableDataType(attributeValue(14));
-    const metadata: ApplicationVariableNodeMetadata = {
-      nodeId,
-      ...(reference ? { browseName: reference.browseName, displayName: reference.displayName } : {}),
-      ...(dataType ? { dataType } : {}),
-      ...(typeof valueRank === "number" && Number.isInteger(valueRank) && valueRank >= -3 ? { valueRank } : {}),
-      ...(Array.isArray(arrayDimensions) &&
-      arrayDimensions.length > 0 &&
-      arrayDimensions.length <= 16 &&
-      arrayDimensions.every((dimension) => Number.isSafeInteger(dimension) && dimension >= 0)
-        ? { arrayDimensions }
-        : {}),
-      ...(!reference && result?.browseName ? { browseName: { namespaceIndex: 0, name: result.browseName } } : {}),
-      ...(!reference && result?.displayName ? { displayName: { text: result.displayName } } : {}),
-      ...(low !== undefined || high !== undefined
-        ? { range: { ...(low !== undefined ? { low } : {}), ...(high !== undefined ? { high } : {}) } }
-        : {}),
-      ...(typeof unitsDisplay?.text === "string" ? { engineeringUnit: unitsDisplay.text } : {}),
-    };
-    await application.inspectVariable(nodeId, metadata);
-  };
   const runtime = {
     snapshot: (): Snapshot => snapshotForTransport(application.snapshot()),
     discover: (request: { endpointUrl: string }): Promise<EndpointDiscoveryResult> => application.discover(request),
@@ -266,11 +153,13 @@ export async function start(): Promise<void> {
       }),
     browse: (request: { nodeId: string }): Promise<BrowseResult> => application.browse(request),
     search: (request: { query: string }): Promise<SearchResult> => application.search(request.query),
-    inspectVariable: ({ nodeId }: { nodeId: string }): Promise<void> => inspectVariable(nodeId),
+    inspectVariable: async ({ nodeId }: { nodeId: string }): Promise<void> => {
+      await application.inspectVariable(nodeId);
+    },
     addToWatchlist: async ({ nodeId }: { nodeId: string }): Promise<void> => {
       const snapshot = application.snapshot();
       const alreadyListed = snapshot.watchlist.includes(nodeId);
-      if (!alreadyListed && snapshot.inspections[nodeId]?.stale !== false) await inspectVariable(nodeId);
+      if (!alreadyListed && snapshot.inspections[nodeId]?.stale !== false) await application.inspectVariable(nodeId);
       await application.addToWatchlist(nodeId);
       try {
         await application.subscribe(nodeId);
