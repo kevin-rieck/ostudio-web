@@ -36,7 +36,10 @@ function schemaType(schema: Schema): string {
   if (schema.type === "boolean") return "boolean";
   if (schema.type === "integer" || schema.type === "number") return "number";
   if (schema.type === "string") return "string";
-  if (schema.type === "object") return "Record<string, unknown>";
+  if (schema.type === "object")
+    return isObject(schema.additionalProperties)
+      ? `Record<string, ${schemaType(schema.additionalProperties)}>`
+      : "Record<string, unknown>";
   return "unknown";
 }
 

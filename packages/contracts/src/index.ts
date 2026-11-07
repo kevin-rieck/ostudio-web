@@ -121,6 +121,9 @@ export interface Snapshot {
   connection: ConnectionSummary;
   selectedNodeId?: string;
   nodes: AddressSpaceNode[];
+  watchlist: string[];
+  inspections: Record<string, VariableNodeInspection>;
+  trends: Record<string, SessionTrendPoint[]>;
   browsed?: BrowseResult;
   search?: SearchResult;
 }
@@ -175,6 +178,41 @@ export interface LiveValue {
   serverTimestamp?: string;
   stale: boolean;
   outOfRange?: boolean;
+}
+
+export interface VariableNodeRequest {
+  nodeId: string;
+}
+
+export interface VariableNodeMetadata {
+  nodeId: string;
+  browseName?: QualifiedName;
+  displayName?: LocalizedText;
+  dataType?: string;
+  valueRank?: number;
+  arrayDimensions?: number[];
+  engineeringUnit?: string;
+  range?: EngineeringRange;
+}
+
+export interface EngineeringRange {
+  low?: number;
+  high?: number;
+}
+
+export interface VariableNodeInspection {
+  nodeId: string;
+  metadata?: VariableNodeMetadata;
+  liveValue?: LiveValue;
+  stale: boolean;
+  outOfRange: boolean;
+  updatedAt?: string;
+}
+
+export interface SessionTrendPoint {
+  timestamp: string;
+  displayValue: string;
+  status: string;
 }
 
 export interface EventEnvelope {
@@ -315,6 +353,9 @@ export interface ApiClient {
   disconnectOpcUa(controllerGeneration: number): Promise<Snapshot>;
   browseAddressSpace(request: BrowseRequest, controllerGeneration: number): Promise<BrowseResult>;
   searchAddressSpace(request: SearchRequest, controllerGeneration: number): Promise<SearchResult>;
+  inspectVariable(request: VariableNodeRequest, controllerGeneration: number): Promise<Snapshot>;
+  addToWatchlist(request: VariableNodeRequest, controllerGeneration: number): Promise<Snapshot>;
+  removeFromWatchlist(request: VariableNodeRequest, controllerGeneration: number): Promise<Snapshot>;
   getDiagnosticReport(): Promise<DiagnosticReport>;
   attachController(): Promise<ControllerState>;
   recoverController(): Promise<ControllerState>;
@@ -399,6 +440,18 @@ export function createApiClient(transport: ContractTransport = defaultTransport,
 
   searchAddressSpace(request: SearchRequest, controllerGeneration: number): Promise<SearchResult> {
     return send<SearchResult>("POST", "/api/v1/address-space/search" + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)), JSON.stringify(request));
+  },
+
+  inspectVariable(request: VariableNodeRequest, controllerGeneration: number): Promise<Snapshot> {
+    return send<Snapshot>("POST", "/api/v1/variables/inspect" + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)), JSON.stringify(request));
+  },
+
+  addToWatchlist(request: VariableNodeRequest, controllerGeneration: number): Promise<Snapshot> {
+    return send<Snapshot>("POST", "/api/v1/watchlist/add" + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)), JSON.stringify(request));
+  },
+
+  removeFromWatchlist(request: VariableNodeRequest, controllerGeneration: number): Promise<Snapshot> {
+    return send<Snapshot>("POST", "/api/v1/watchlist/remove" + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)), JSON.stringify(request));
   },
 
   getDiagnosticReport(): Promise<DiagnosticReport> {

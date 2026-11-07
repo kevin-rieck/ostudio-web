@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { VariableObservation } from "./VariableObservation.js";
 import {
   ApiClientError,
   createApiClient,
@@ -20,6 +21,8 @@ export function App() {
   const [message, setMessage] = useState<string>();
   const [insecureDevelopment, setInsecureDevelopment] = useState(false);
   const [snapshot, setSnapshot] = useState<Snapshot>();
+  const [resynchronizing, setResynchronizing] = useState(false);
+  const [selectedNodeId, setSelectedNodeId] = useState<string>();
   const controllerRole = snapshot?.controller.role ?? "observer";
   const [endpointUrl, setEndpointUrl] = useState("");
   const [discovery, setDiscovery] = useState<EndpointDiscoveryResult>();
@@ -27,6 +30,7 @@ export function App() {
   const [browseNodeId, setBrowseNodeId] = useState("i=84");
   const [searchQuery, setSearchQuery] = useState("");
   const [working, setWorking] = useState(false);
+  const eventStreamHealthy = useRef(false);
   const controllerControls = useRef<{ setGeneration(generation: number): void; startRenewal(): void } | undefined>(
     undefined,
   );
@@ -42,41 +46,62 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    eventStreamHealthy.current = false;
     if (!authenticated) {
       setSnapshot(undefined);
+      setResynchronizing(false);
+      setSelectedNodeId(undefined);
       return;
     }
     let stopped = false;
     let connecting = false;
+    let reconnectRequested = false;
     let source: EventSource | undefined;
     let renewTimer: number | undefined;
     let retryTimer: number | undefined;
     let controllerGeneration: number | undefined;
+    let snapshotRevision = 0;
+    let refreshPromise: Promise<Snapshot> | undefined;
     const stopRenewal = (): void => {
       if (renewTimer !== undefined) window.clearInterval(renewTimer);
       renewTimer = undefined;
     };
+    const markValuesStale = (): void => {
+      setResynchronizing(true);
+    };
+    const refreshSnapshot = (): Promise<Snapshot> => {
+      snapshotRevision += 1;
+      if (refreshPromise) return refreshPromise;
+      const refresh = async (): Promise<Snapshot> => {
+        while (!stopped) {
+          const revision = snapshotRevision;
+          const [current, report] = await Promise.all([api.getSnapshot(), api.getDiagnosticReport()]);
+          if (stopped) return current;
+          if (revision !== snapshotRevision) continue;
+          setDiagnostics(report);
+          setSnapshot(current);
+          if (eventStreamHealthy.current && navigator.onLine) setResynchronizing(false);
+          controllerGeneration = current.controller.controllerGeneration;
+          if (current.controller.role === "controller") startRenewal();
+          else stopRenewal();
+          return current;
+        }
+        return api.getSnapshot();
+      };
+      refreshPromise = refresh().finally(() => {
+        refreshPromise = undefined;
+      });
+      return refreshPromise;
+    };
     const startRenewal = (): void => {
-      stopRenewal();
-      if (controllerGeneration === undefined) return;
+      if (controllerGeneration === undefined || renewTimer !== undefined) return;
       renewTimer = window.setInterval(() => {
         void api.renewControllerLease(controllerGeneration!).catch(() => {
           stopRenewal();
-          setSnapshot(undefined);
+          markValuesStale();
           void refreshSnapshot().catch(() => undefined);
         });
       }, 5_000);
-    };
-    const refreshSnapshot = async (): Promise<Snapshot> => {
-      const [current, report] = await Promise.all([api.getSnapshot(), api.getDiagnosticReport()]);
-      if (!stopped) {
-        setDiagnostics(report);
-        setSnapshot(current);
-        controllerGeneration = current.controller.controllerGeneration;
-        if (current.controller.role === "controller") startRenewal();
-        else stopRenewal();
-      }
-      return current;
     };
     const retry = (): void => {
       if (!stopped && retryTimer === undefined)
@@ -86,26 +111,67 @@ export function App() {
         }, 1_000);
     };
     const connectEvents = async (): Promise<void> => {
-      if (stopped || connecting) return;
+      if (stopped) return;
+      if (connecting) {
+        reconnectRequested = true;
+        return;
+      }
       connecting = true;
+      eventStreamHealthy.current = false;
       try {
         const current = await refreshSnapshot();
         if (stopped) return;
         source?.close();
         const eventSource = new EventSource(`/api/v1/events?afterSequence=${current.sequence}`);
         source = eventSource;
-        eventSource.onmessage = () => void refreshSnapshot().catch(retry);
+        eventSource.onopen = () => {
+          if (source !== eventSource) return;
+          eventStreamHealthy.current = true;
+          void refreshSnapshot().catch(retry);
+        };
+        eventSource.onmessage = (event) => {
+          if (source !== eventSource) return;
+          const envelope = JSON.parse(event.data) as { type: string; payload: { reason?: string } };
+          if (envelope.type === "snapshot-required" && envelope.payload.reason === "gap") markValuesStale();
+          void refreshSnapshot().catch(() => {
+            markValuesStale();
+            retry();
+          });
+        };
         eventSource.onerror = () => {
+          if (source !== eventSource) return;
           eventSource.close();
-          if (source === eventSource) source = undefined;
+          source = undefined;
+          eventStreamHealthy.current = false;
+          markValuesStale();
           retry();
         };
       } catch {
         retry();
       } finally {
         connecting = false;
+        if (reconnectRequested) {
+          reconnectRequested = false;
+          void connectEvents();
+        }
       }
     };
+    const onOffline = (): void => {
+      eventStreamHealthy.current = false;
+      markValuesStale();
+      source?.close();
+      source = undefined;
+      retry();
+    };
+    const onOnline = (): void => {
+      eventStreamHealthy.current = false;
+      markValuesStale();
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      retryTimer = undefined;
+      void connectEvents();
+    };
+    window.addEventListener("offline", onOffline);
+    window.addEventListener("online", onOnline);
     controllerControls.current = {
       setGeneration: (generation) => {
         controllerGeneration = generation;
@@ -125,8 +191,11 @@ export function App() {
       });
     return () => {
       stopped = true;
+      eventStreamHealthy.current = false;
       source?.close();
       stopRenewal();
+      window.removeEventListener("offline", onOffline);
+      window.removeEventListener("online", onOnline);
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       controllerControls.current = undefined;
     };
@@ -179,6 +248,7 @@ export function App() {
         snapshot!.controller.controllerGeneration,
       );
       setSnapshot(current);
+      clearResynchronizing();
     }, "The OPC UA Server connection failed.");
   }
 
@@ -186,6 +256,8 @@ export function App() {
     await withWorking(async () => {
       const current = await api.disconnectOpcUa(snapshot!.controller.controllerGeneration);
       setSnapshot(current);
+      clearResynchronizing();
+      setSelectedNodeId(undefined);
       setDiscovery(undefined);
     }, "The OPC UA Server could not be disconnected.");
   }
@@ -201,7 +273,33 @@ export function App() {
     await withWorking(async () => {
       await api.searchAddressSpace({ query: searchQuery }, snapshot!.controller.controllerGeneration);
       setSnapshot(await api.getSnapshot());
+      clearResynchronizing();
     }, "Address Space Search failed.");
+  }
+
+  async function inspectVariable(nodeId: string): Promise<void> {
+    setSelectedNodeId(nodeId);
+    if (controllerRole !== "controller" || !snapshot) return;
+    await withWorking(async () => {
+      setSnapshot(await api.inspectVariable({ nodeId }, snapshot.controller.controllerGeneration));
+      clearResynchronizing();
+    }, "Variable Node Inspection failed.");
+  }
+
+  async function addToWatchlist(nodeId: string): Promise<void> {
+    if (!snapshot) return;
+    await withWorking(async () => {
+      setSnapshot(await api.addToWatchlist({ nodeId }, snapshot.controller.controllerGeneration));
+      clearResynchronizing();
+    }, "The Variable Node could not be added to the Watchlist.");
+  }
+
+  async function removeFromWatchlist(nodeId: string): Promise<void> {
+    if (!snapshot) return;
+    await withWorking(async () => {
+      setSnapshot(await api.removeFromWatchlist({ nodeId }, snapshot.controller.controllerGeneration));
+      clearResynchronizing();
+    }, "The Variable Node could not be removed from the Watchlist.");
   }
 
   async function recoverControl(): Promise<void> {
@@ -230,6 +328,11 @@ export function App() {
     }, "Sign-out failed.");
   }
 
+  const selectedNode = snapshot?.nodes.find((node) => node.nodeId === selectedNodeId);
+  const clearResynchronizing = (): void => {
+    if (eventStreamHealthy.current && navigator.onLine) setResynchronizing(false);
+  };
+
   return (
     <main className="shell">
       <p className="eyebrow">OPC UA Studio</p>
@@ -246,6 +349,11 @@ export function App() {
             {snapshot?.connection.state ?? "disconnected"} ·{" "}
             {controllerRole === "controller" ? "Controller" : "Observer"} · Read-Only Mode
           </p>
+          {resynchronizing && (
+            <p className="warning" role="status">
+              Live Values are stale while OPC UA Studio resynchronizes from an authoritative snapshot.
+            </p>
+          )}
           {controllerRole === "observer" &&
             (snapshot?.controller.recoverable ? (
               <button type="button" onClick={() => void recoverControl()} disabled={working}>
@@ -304,7 +412,15 @@ export function App() {
             <section aria-label="Address Space">
               <ul>
                 {snapshot.nodes.map((node) => (
-                  <li key={node.nodeId}>{node.displayName}</li>
+                  <li key={node.nodeId}>
+                    {node.nodeClass === "Variable" ? (
+                      <button type="button" onClick={() => void inspectVariable(node.nodeId)}>
+                        {node.displayName}
+                      </button>
+                    ) : (
+                      node.displayName
+                    )}
+                  </li>
                 ))}
               </ul>
             </section>
@@ -326,7 +442,14 @@ export function App() {
                 <ul>
                   {snapshot.browsed.references.map((reference) => (
                     <li key={reference.nodeId}>
-                      <button type="button" onClick={() => setBrowseNodeId(reference.nodeId)}>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          reference.nodeClass === "Variable"
+                            ? void inspectVariable(reference.nodeId)
+                            : setBrowseNodeId(reference.nodeId)
+                        }
+                      >
                         {reference.displayName.text ?? reference.browseName.name ?? reference.nodeId}
                       </button>
                     </li>
@@ -351,7 +474,14 @@ export function App() {
                   <ul aria-label="Search matches">
                     {snapshot.search.results.map((match) => (
                       <li key={match.nodeId}>
-                        <button type="button" onClick={() => setBrowseNodeId(match.nodeId)}>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            match.nodeClass === "Variable"
+                              ? void inspectVariable(match.nodeId)
+                              : setBrowseNodeId(match.nodeId)
+                          }
+                        >
                           {match.displayName ?? match.browseName ?? match.nodeId}
                         </button>
                       </li>
@@ -360,6 +490,19 @@ export function App() {
                 </>
               )}
             </section>
+          )}
+          {snapshot && (
+            <VariableObservation
+              snapshot={snapshot}
+              selectedNodeId={selectedNodeId}
+              selectedNode={selectedNode}
+              resynchronizing={resynchronizing}
+              controllerRole={controllerRole}
+              working={working}
+              onSelect={setSelectedNodeId}
+              onAddToWatchlist={(nodeId) => void addToWatchlist(nodeId)}
+              onRemoveFromWatchlist={(nodeId) => void removeFromWatchlist(nodeId)}
+            />
           )}
           {diagnostics.length > 0 && (
             <section aria-label="Diagnostics">

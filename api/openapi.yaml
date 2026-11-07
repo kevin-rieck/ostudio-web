@@ -220,6 +220,60 @@
         }
       }
     },
+    "/api/v1/variables/inspect": {
+      "post": {
+        "operationId": "inspectVariable",
+        "parameters": [{ "name": "controllerGeneration", "in": "query", "required": true, "schema": { "type": "integer" } }],
+        "security": [{ "sessionCookie": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VariableNodeRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Authoritative snapshot after Variable Node Inspection.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Snapshot" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/ControllerUnavailable" },
+          "502": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/v1/watchlist/add": {
+      "post": {
+        "operationId": "addToWatchlist",
+        "parameters": [{ "name": "controllerGeneration", "in": "query", "required": true, "schema": { "type": "integer" } }],
+        "security": [{ "sessionCookie": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VariableNodeRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Authoritative snapshot after Watchlist subscription starts.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Snapshot" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/ControllerUnavailable" },
+          "502": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/v1/watchlist/remove": {
+      "post": {
+        "operationId": "removeFromWatchlist",
+        "parameters": [{ "name": "controllerGeneration", "in": "query", "required": true, "schema": { "type": "integer" } }],
+        "security": [{ "sessionCookie": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VariableNodeRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Authoritative snapshot after Watchlist subscription ends.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Snapshot" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/ControllerUnavailable" },
+          "502": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
     "/api/v1/diagnostics": {
       "get": {
         "operationId": "getDiagnosticReport",
@@ -566,7 +620,7 @@
       "Snapshot": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["sequence", "buildVersion", "generatedAt", "controller", "safety", "connection", "nodes"],
+        "required": ["sequence", "buildVersion", "generatedAt", "controller", "safety", "connection", "nodes", "watchlist", "inspections", "trends"],
         "properties": {
           "sequence": { "type": "integer", "minimum": 0 },
           "buildVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
@@ -576,6 +630,9 @@
           "connection": { "$ref": "#/components/schemas/ConnectionSummary" },
           "selectedNodeId": { "type": "string", "maxLength": 512 },
           "nodes": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/components/schemas/AddressSpaceNode" } },
+          "watchlist": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "maxLength": 512 } },
+          "inspections": { "type": "object", "maxProperties": 10000, "additionalProperties": { "$ref": "#/components/schemas/VariableNodeInspection" } },
+          "trends": { "type": "object", "maxProperties": 100, "additionalProperties": { "type": "array", "maxItems": 500, "items": { "$ref": "#/components/schemas/SessionTrendPoint" } } },
           "browsed": { "$ref": "#/components/schemas/BrowseResult" },
           "search": { "$ref": "#/components/schemas/SearchResult" }
         }
@@ -658,6 +715,58 @@
           "serverTimestamp": { "type": "string", "format": "date-time" },
           "stale": { "type": "boolean" },
           "outOfRange": { "type": "boolean" }
+        }
+      },
+      "VariableNodeRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["nodeId"],
+        "properties": { "nodeId": { "type": "string", "minLength": 1, "maxLength": 512 } }
+      },
+      "VariableNodeMetadata": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["nodeId"],
+        "properties": {
+          "nodeId": { "type": "string", "maxLength": 512 },
+          "browseName": { "$ref": "#/components/schemas/QualifiedName" },
+          "displayName": { "$ref": "#/components/schemas/LocalizedText" },
+          "dataType": { "type": "string", "maxLength": 128 },
+          "valueRank": { "type": "integer", "minimum": -3 },
+          "arrayDimensions": { "type": "array", "maxItems": 1024, "items": { "type": "integer", "minimum": 0 } },
+          "engineeringUnit": { "type": "string", "maxLength": 128 },
+          "range": { "$ref": "#/components/schemas/EngineeringRange" }
+        }
+      },
+      "EngineeringRange": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "low": { "type": "number" },
+          "high": { "type": "number" }
+        }
+      },
+      "VariableNodeInspection": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["nodeId", "stale", "outOfRange"],
+        "properties": {
+          "nodeId": { "type": "string", "maxLength": 512 },
+          "metadata": { "$ref": "#/components/schemas/VariableNodeMetadata" },
+          "liveValue": { "$ref": "#/components/schemas/LiveValue" },
+          "stale": { "type": "boolean" },
+          "outOfRange": { "type": "boolean" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "SessionTrendPoint": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["timestamp", "displayValue", "status"],
+        "properties": {
+          "timestamp": { "type": "string", "format": "date-time" },
+          "displayValue": { "type": "string", "maxLength": 4096 },
+          "status": { "type": "string", "maxLength": 128 }
         }
       },
       "EventEnvelope": {

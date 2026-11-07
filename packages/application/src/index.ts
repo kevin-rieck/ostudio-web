@@ -451,6 +451,9 @@ const DEFAULT_CONFIG: Required<ApplicationConfig> = {
   trendPointLimit: 500,
 };
 
+const SNAPSHOT_INSPECTION_LIMIT = 100;
+const SNAPSHOT_TREND_NODE_LIMIT = 100;
+
 function freeze<T>(value: T): Readonly<T> {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {
     Object.freeze(value);
@@ -1029,19 +1032,45 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
       const generation = state.connection.connectionGeneration;
       const result = await safeRead(currentSession, generation, () => currentSession.read({ nodeId }));
       const value = result.dataValue;
+      const resolvedMetadata: VariableNodeMetadata = {
+        ...metadata,
+        nodeId,
+        ...(!metadata?.dataType && value.value?.dataType ? { dataType: value.value.dataType } : {}),
+      };
       const inspection: VariableNodeInspection = {
         nodeId,
-        metadata,
+        metadata: resolvedMetadata,
         value,
         stale: false,
-        outOfRange: isOutOfRange(value.value, metadata?.range),
+        outOfRange: isOutOfRange(value.value, resolvedMetadata.range),
         updatedAt: dependencies.clock.now().toISOString(),
       };
       if (session === currentSession && state.connection.connectionGeneration === generation) {
-        update(
-          (current) => ({ ...current, inspections: { ...current.inspections, [nodeId]: inspection } }),
-          "inspection-changed",
-        );
+        update((current) => {
+          const inspections = { ...current.inspections };
+          delete inspections[nodeId];
+          inspections[nodeId] = inspection;
+          if (Object.keys(inspections).length > SNAPSHOT_INSPECTION_LIMIT) {
+            const retainedNodeIds = [
+              nodeId,
+              ...current.watchlist
+                .filter((watchedNodeId) => watchedNodeId !== nodeId && watchedNodeId in inspections)
+                .reverse(),
+              ...Object.keys(inspections)
+                .reverse()
+                .filter(
+                  (inspectedNodeId) => inspectedNodeId !== nodeId && !current.watchlist.includes(inspectedNodeId),
+                ),
+            ].slice(0, SNAPSHOT_INSPECTION_LIMIT);
+            return {
+              ...current,
+              inspections: Object.fromEntries(
+                retainedNodeIds.map((retainedNodeId) => [retainedNodeId, inspections[retainedNodeId]!]),
+              ),
+            };
+          }
+          return { ...current, inspections };
+        }, "inspection-changed");
       }
       return inspection;
     },
@@ -1065,6 +1094,12 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
         const timestamp = value.sourceTimestamp ?? value.serverTimestamp ?? dependencies.clock.now().toISOString();
         const point: TrendPoint = { timestamp, value: value.value?.value ?? null, status: value.status };
         const points = [...(trendPoints.get(nodeId) ?? []), point].slice(-config.trendPointLimit);
+        if (!trendPoints.has(nodeId) && trendPoints.size >= SNAPSHOT_TREND_NODE_LIMIT) {
+          const oldestUnwatchedNode = [...trendPoints.keys()].find(
+            (trendedNodeId) => !state.watchlist.includes(trendedNodeId),
+          );
+          trendPoints.delete(oldestUnwatchedNode ?? trendPoints.keys().next().value!);
+        }
         trendPoints.set(nodeId, points);
         update((current) => {
           const previous = current.inspections[nodeId];
@@ -1077,7 +1112,7 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
                   [nodeId]: { ...previous, value, stale: false, outOfRange, updatedAt: timestamp },
                 }
               : current.inspections,
-            trends: { ...current.trends, [nodeId]: points },
+            trends: Object.fromEntries(trendPoints),
           };
         }, "trend-changed");
       });
