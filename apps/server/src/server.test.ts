@@ -1,6 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, writeFile } from "node:fs/promises";
-import { request } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { createServer, type TimerScheduler, type WebServer } from "./server.js";
@@ -1411,53 +1410,31 @@ describe("server routes", () => {
   it("closes an expired backpressured stream before draining queued events", async () => {
     const clock = fakeTimers();
     server = await createServer({ env: developmentEnvironment, now: clock.now, timers: clock.timers });
+    let response!: import("node:http").ServerResponse;
+    const write = vi.fn(() => false);
+    server.addHook("onRequest", async (request, reply) => {
+      if (!request.url.startsWith("/api/v1/events")) return;
+      response = reply.raw;
+      vi.spyOn(response, "write").mockImplementation(write);
+    });
     const login = await server.inject({
       method: "POST",
       url: "/api/v1/auth/login",
       headers: { origin: "http://localhost:8080" },
       payload: { username: "admin", password: "correct horse battery staple" },
     });
-    const address = await server.listen({ port: 0, host: "127.0.0.1" });
-    const port = Number(new URL(address).port);
-    let response!: import("node:http").IncomingMessage;
-    let finishBody!: (body: string) => void;
-    let failBody!: (error: Error) => void;
-    const body = new Promise<string>((resolve, reject) => {
-      finishBody = resolve;
-      failBody = reject;
-    });
-    const connected = new Promise<void>((resolve, reject) => {
-      const chunks: string[] = [];
-      const stream = request(
-        {
-          hostname: "127.0.0.1",
-          port,
-          path: "/api/v1/events?afterSequence=0",
-          headers: { origin: "http://localhost:8080", cookie: String(login.headers["set-cookie"]) },
-        },
-        (incoming) => {
-          response = incoming;
-          incoming.setEncoding("utf8");
-          incoming.on("data", (chunk: string) => chunks.push(chunk));
-          incoming.on("end", () => finishBody(chunks.join("")));
-          incoming.on("error", failBody);
-          incoming.pause();
-          resolve();
-        },
-      );
-      stream.on("error", reject);
-      stream.end();
+    const stream = server.inject({
+      method: "GET",
+      url: "/api/v1/events?afterSequence=0",
+      headers: { origin: "http://localhost:8080", cookie: String(login.headers["set-cookie"]) },
     });
     await new Promise<void>((resolve) => setImmediate(resolve));
-    await connected;
-    server.publishEvent("live-value-changed", {
-      nodeId: "ns=1;s=slow",
-      liveValue: { displayValue: "x".repeat(20_000), status: "Good", stale: false },
-    });
+    expect(write).toHaveBeenCalledTimes(1);
     server.publishEvent("snapshot-required", { reason: "reconnect" });
     clock.setTime(24 * 60 * 60 * 1000);
-    response.resume();
-    await expect(body).resolves.not.toContain('"reason":"reconnect"');
+    response.emit("drain");
+    expect((await stream).statusCode).toBe(200);
+    expect(write).toHaveBeenCalledTimes(1);
   });
 
   it("validates native EventSource attachments without weakening origin checks", async () => {
