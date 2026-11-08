@@ -198,6 +198,23 @@ describe("server routes", () => {
     ).toBe(204);
     expect(calls).toEqual(["save:plc", "connect:plc:transient", "delete:plc"]);
     expect(savedEndpoint).toBe("opc.tcp://plc:4840/path");
+    for (const extra of [{ id: "another-plc" }, { password: "must-not-persist" }, { unexpected: true }]) {
+      const response = await server.inject({
+        method: "PUT",
+        url: "/api/v1/saved-connections/plc?controllerGeneration=1",
+        headers,
+        payload: {
+          name: "PLC",
+          endpoint: "opc.tcp://plc:4840",
+          securityPolicy: "None",
+          securityMode: "None",
+          ...extra,
+        },
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ code: "bad_request" });
+    }
+    expect(calls).toEqual(["save:plc", "connect:plc:transient", "delete:plc"]);
   });
 
   it("rejects unsafe secure Saved Connection certificate pins at the HTTP boundary", async () => {
@@ -255,6 +272,7 @@ describe("server routes", () => {
   });
 
   it("returns typed not-found and bad-request responses for Saved Connection reconnects", async () => {
+    const connected: string[] = [];
     server = await createServer({
       env: developmentEnvironment,
       runtime: {
@@ -267,7 +285,11 @@ describe("server routes", () => {
           connection: { state: "disconnected" },
           nodes: [],
         }),
-        connectSavedConnection: async () => ({ outcome: "not_found" }),
+        connectSavedConnection: async (id, request) => {
+          connected.push(id);
+          if (request.userSecret === "runtime-failure") throw new Error("OPC UA failure");
+          return { outcome: "not_found" };
+        },
       },
     });
     const login = await server.inject({
@@ -294,6 +316,27 @@ describe("server routes", () => {
     });
     expect(invalid.statusCode).toBe(400);
     expect(invalid.json()).toMatchObject({ code: "bad_request" });
+    for (const field of ["userSecret", "password"]) {
+      for (const value of [123, null, {}, "x".repeat(1025)]) {
+        const malformed = await server.inject({
+          method: "POST",
+          url: "/api/v1/saved-connections/plc/connect?controllerGeneration=1",
+          headers,
+          payload: { [field]: value },
+        });
+        expect(malformed.statusCode).toBe(400);
+        expect(malformed.json()).toMatchObject({ code: "bad_request" });
+      }
+    }
+    expect(connected).toEqual(["plc"]);
+    const failed = await server.inject({
+      method: "POST",
+      url: "/api/v1/saved-connections/plc/connect?controllerGeneration=1",
+      headers,
+      payload: { userSecret: "runtime-failure" },
+    });
+    expect(failed.statusCode).toBe(502);
+    expect(failed.json()).toMatchObject({ code: "connection_failed" });
   });
 
   it("uses one generic failed-login response and rejects cross-origin state changes", async () => {

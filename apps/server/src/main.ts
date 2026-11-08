@@ -85,7 +85,7 @@ export async function start(): Promise<void> {
       savedConnections: await application.listSavedConnections(),
     }),
     saveSavedConnection: async (id: string, request: SavedConnectionRequest) => {
-      await application.saveSavedConnection({ id, ...request });
+      await application.saveSavedConnection({ ...request, id });
     },
     deleteSavedConnection: (id: string): Promise<void> => application.removeSavedConnection(id),
     connectSavedConnection: async (

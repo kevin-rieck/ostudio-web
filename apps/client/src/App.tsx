@@ -352,9 +352,19 @@ export function App() {
             <section aria-labelledby="saved-connections-heading">
               <h3 id="saved-connections-heading">Saved Connections</h3>
               {savedDraft.certificateReviewRequired && (
-                <p className="warning" role="alert">
-                  This Saved Connection contains legacy certificate details and requires review before secure reconnect.
-                </p>
+                <div className="warning" role="alert">
+                  <p>
+                    This Saved Connection contains legacy certificate details. Review the endpoint, security settings,
+                    and server certificate SHA-256 pin before accepting and saving.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={working}
+                    onClick={() => setSavedDraft((current) => ({ ...current, certificateReviewRequired: false }))}
+                  >
+                    Accept reviewed certificate details
+                  </button>
+                </div>
               )}
               {savedConnections.length > 0 && (
                 <ul aria-label="Saved Connections">

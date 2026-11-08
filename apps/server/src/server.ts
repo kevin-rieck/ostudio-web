@@ -842,6 +842,18 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     const body = requestBody<Partial<SavedConnectionRequest>>(request);
     if (
       !body ||
+      Object.keys(body).some(
+        (key) =>
+          ![
+            "name",
+            "endpoint",
+            "securityPolicy",
+            "securityMode",
+            "username",
+            "serverCertificatePin",
+            "certificateReviewRequired",
+          ].includes(key),
+      ) ||
       typeof body.name !== "string" ||
       body.name.length < 1 ||
       body.name.length > 256 ||
@@ -864,16 +876,14 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     if (body.securityMode !== "None" && !hasValidPin && body.certificateReviewRequired !== true) return undefined;
     return { ...body, endpoint } as SavedConnectionRequest;
   };
-  const savedConnectionConnectRequest = (request: FastifyRequest): SavedConnectionConnectRequest => {
+  const savedConnectionConnectRequest = (request: FastifyRequest): SavedConnectionConnectRequest | undefined => {
     const body = requestBody<{ userSecret?: unknown; password?: unknown }>(request);
+    if (request.body !== undefined && (!body || Array.isArray(body))) return undefined;
+    for (const secret of [body?.userSecret, body?.password]) {
+      if (secret !== undefined && (typeof secret !== "string" || secret.length > 1024)) return undefined;
+    }
     const secret = body?.userSecret ?? body?.password;
-    return secret === undefined
-      ? {}
-      : typeof secret === "string" && secret.length <= 1024
-        ? { userSecret: secret }
-        : (() => {
-            throw new Error("invalid user secret");
-          })();
+    return typeof secret === "string" ? { userSecret: secret } : {};
   };
   const runtimeError = (
     reply: FastifyReply,
@@ -919,10 +929,10 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       async () => {
         const id = savedConnectionId(request);
         if (!id) return void reply.code(400).send(errorBody("bad_request", "The Saved Connection ID is invalid."));
+        const body = savedConnectionConnectRequest(request);
+        if (!body) return void reply.code(400).send(errorBody("bad_request", "The user secret is invalid."));
         if (!options.runtime?.connectSavedConnection) return runtimeError(reply, "connection_failed");
-        let body: SavedConnectionConnectRequest;
         try {
-          body = savedConnectionConnectRequest(request);
           const result = await options.runtime.connectSavedConnection(id, body);
           if (result?.outcome === "not_found")
             return void reply
