@@ -452,6 +452,42 @@ const DEFAULT_CONFIG: Required<ApplicationConfig> = {
   trendPointLimit: 500,
 };
 
+const standardDataTypes: Record<number, OpcUaDataType> = {
+  1: "Boolean",
+  2: "SByte",
+  3: "Byte",
+  4: "Int16",
+  5: "UInt16",
+  6: "Int32",
+  7: "UInt32",
+  8: "Int64",
+  9: "UInt64",
+  10: "Float",
+  11: "Double",
+  12: "String",
+  13: "DateTime",
+  14: "Guid",
+  15: "ByteString",
+  16: "XmlElement",
+  17: "NodeId",
+  18: "ExpandedNodeId",
+  19: "StatusCode",
+  20: "QualifiedName",
+  21: "LocalizedText",
+  22: "ExtensionObject",
+  23: "DataValue",
+  24: "Variant",
+  25: "DiagnosticInfo",
+};
+
+function variableDataType(value: unknown): OpcUaDataType | undefined {
+  const match = /^(?:ns=0;)?i=(\d+)$/.exec(String(value));
+  return match ? standardDataTypes[Number(match[1])] : undefined;
+}
+
+const SNAPSHOT_INSPECTION_LIMIT = 100;
+const SNAPSHOT_TREND_NODE_LIMIT = 100;
+
 function freeze<T>(value: T): Readonly<T> {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {
     Object.freeze(value);
@@ -1029,21 +1065,130 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
     inspectVariable: async (nodeId, metadata) => {
       const currentSession = requireSession();
       const generation = state.connection.connectionGeneration;
+      if (metadata === undefined) {
+        const attributes = await facade.read([
+          { nodeId, attributeId: 2 },
+          { nodeId, attributeId: 14 },
+          { nodeId, attributeId: 15 },
+          { nodeId, attributeId: 16 },
+        ]);
+        if (!isCurrentSession(currentSession, generation))
+          throw new ApplicationError("connection_required", "The OPC UA connection changed during inspection.");
+        const readResults = Array.isArray(attributes) ? attributes : [attributes];
+        const attributeValue = (attributeId: number): unknown => {
+          const result = readResults.find((item) => item.attributeId === attributeId);
+          return result?.dataValue.status.name === "Good" ? result.dataValue.value?.value : undefined;
+        };
+        if (attributeValue(2) !== 2) {
+          throw new ApplicationError("invalid_request", "The selected node is not a readable Variable Node.");
+        }
+        const source = state;
+        const reference = source.browsed?.references.find((candidate) => candidate.nodeId === nodeId);
+        const result = source.search.results.find((candidate) => candidate.nodeId === nodeId);
+        let browseResult;
+        try {
+          browseResult = await facade.browse({ nodeId });
+        } catch (error) {
+          if (!(error instanceof ApplicationError) || error.code !== "browse_budget_exhausted") throw error;
+          await new Promise<void>((resolve) => timers.setTimeout(resolve, 1_000));
+          if (!isCurrentSession(currentSession, generation))
+            throw new ApplicationError("connection_required", "The OPC UA connection changed during inspection.");
+          browseResult = await facade.browse({ nodeId });
+        }
+        if (!isCurrentSession(currentSession, generation))
+          throw new ApplicationError("connection_required", "The OPC UA connection changed during inspection.");
+        const properties = browseResult.references.filter((candidate) =>
+          ["EURange", "EngineeringUnits"].includes(candidate.browseName.name ?? ""),
+        );
+        const propertyValues = properties.length
+          ? await facade.read(properties.map((property) => ({ nodeId: property.nodeId })))
+          : [];
+        const readValues = Array.isArray(propertyValues) ? propertyValues : [propertyValues];
+        const propertyValue = (name: string): unknown => {
+          const index = properties.findIndex((property) => property.browseName.name === name);
+          return index >= 0 ? readValues[index]?.dataValue.value?.value : undefined;
+        };
+        const rangeValue = propertyValue("EURange");
+        const rangeObject =
+          typeof rangeValue === "object" && rangeValue !== null ? (rangeValue as Record<string, unknown>) : undefined;
+        const low =
+          typeof rangeObject?.low === "number" && Number.isFinite(rangeObject.low) ? rangeObject.low : undefined;
+        const high =
+          typeof rangeObject?.high === "number" && Number.isFinite(rangeObject.high) ? rangeObject.high : undefined;
+        const unitsValue = propertyValue("EngineeringUnits");
+        const unitsObject =
+          typeof unitsValue === "object" && unitsValue !== null ? (unitsValue as Record<string, unknown>) : undefined;
+        const unitsDisplay =
+          typeof unitsObject?.displayName === "object" && unitsObject.displayName !== null
+            ? (unitsObject.displayName as Record<string, unknown>)
+            : undefined;
+        const valueRank = attributeValue(15);
+        const arrayDimensions = attributeValue(16);
+        const dataType = variableDataType(attributeValue(14));
+        const resolvedMetadata: VariableNodeMetadata = {
+          nodeId,
+          ...(reference ? { browseName: reference.browseName, displayName: reference.displayName } : {}),
+          ...(dataType ? { dataType } : {}),
+          ...(typeof valueRank === "number" && Number.isInteger(valueRank) && valueRank >= -3 ? { valueRank } : {}),
+          ...(Array.isArray(arrayDimensions) &&
+          arrayDimensions.length > 0 &&
+          arrayDimensions.length <= 16 &&
+          arrayDimensions.every((dimension) => Number.isSafeInteger(dimension) && dimension >= 0)
+            ? { arrayDimensions }
+            : {}),
+          ...(!reference && result?.browseName ? { browseName: { namespaceIndex: 0, name: result.browseName } } : {}),
+          ...(!reference && result?.displayName ? { displayName: { text: result.displayName } } : {}),
+          ...(low !== undefined || high !== undefined
+            ? { range: { ...(low !== undefined ? { low } : {}), ...(high !== undefined ? { high } : {}) } }
+            : {}),
+          ...(typeof unitsDisplay?.text === "string" ? { engineeringUnit: unitsDisplay.text } : {}),
+        };
+        metadata = resolvedMetadata;
+      }
+      if (!isCurrentSession(currentSession, generation))
+        throw new ApplicationError("connection_required", "The OPC UA connection changed during inspection.");
       const result = await safeRead(currentSession, generation, () => currentSession.read({ nodeId }));
       const value = result.dataValue;
+      const resolvedMetadata: VariableNodeMetadata = {
+        ...metadata,
+        nodeId,
+        ...(!metadata?.dataType && value.value?.dataType ? { dataType: value.value.dataType } : {}),
+      };
       const inspection: VariableNodeInspection = {
         nodeId,
-        metadata,
+        metadata: resolvedMetadata,
         value,
         stale: false,
-        outOfRange: isOutOfRange(value.value, metadata?.range),
+        outOfRange: isOutOfRange(value.value, resolvedMetadata.range),
         updatedAt: dependencies.clock.now().toISOString(),
       };
       if (session === currentSession && state.connection.connectionGeneration === generation) {
-        update(
-          (current) => ({ ...current, inspections: { ...current.inspections, [nodeId]: inspection } }),
-          "inspection-changed",
-        );
+        update((current) => {
+          const inspections = { ...current.inspections };
+          delete inspections[nodeId];
+          inspections[nodeId] = inspection;
+          const inspectionLimit = Math.max(SNAPSHOT_INSPECTION_LIMIT, current.watchlist.length + 1);
+          if (Object.keys(inspections).length > inspectionLimit) {
+            const retainedNodeIds = [
+              nodeId,
+              ...current.watchlist
+                .filter((watchedNodeId) => watchedNodeId !== nodeId && watchedNodeId in inspections)
+                .reverse(),
+              ...Object.keys(inspections)
+                .reverse()
+                .filter(
+                  (inspectedNodeId) => inspectedNodeId !== nodeId && !current.watchlist.includes(inspectedNodeId),
+                ),
+            ].slice(0, inspectionLimit);
+            return {
+              ...current,
+              inspections: Object.fromEntries(
+                retainedNodeIds.map((retainedNodeId) => [retainedNodeId, inspections[retainedNodeId]!]),
+              ),
+            };
+          }
+          return { ...current, inspections };
+        }, "inspection-changed");
       }
       return inspection;
     },
@@ -1067,6 +1212,12 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
         const timestamp = value.sourceTimestamp ?? value.serverTimestamp ?? dependencies.clock.now().toISOString();
         const point: TrendPoint = { timestamp, value: value.value?.value ?? null, status: value.status };
         const points = [...(trendPoints.get(nodeId) ?? []), point].slice(-config.trendPointLimit);
+        if (!trendPoints.has(nodeId) && trendPoints.size >= SNAPSHOT_TREND_NODE_LIMIT) {
+          const oldestUnwatchedNode = [...trendPoints.keys()].find(
+            (trendedNodeId) => !state.watchlist.includes(trendedNodeId),
+          );
+          trendPoints.delete(oldestUnwatchedNode ?? trendPoints.keys().next().value!);
+        }
         trendPoints.set(nodeId, points);
         update((current) => {
           const previous = current.inspections[nodeId];
@@ -1079,7 +1230,7 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
                   [nodeId]: { ...previous, value, stale: false, outOfRange, updatedAt: timestamp },
                 }
               : current.inspections,
-            trends: { ...current.trends, [nodeId]: points },
+            trends: Object.fromEntries(trendPoints),
           };
         }, "trend-changed");
       });

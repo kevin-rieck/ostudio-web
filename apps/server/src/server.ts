@@ -17,6 +17,7 @@ import {
   type SavedConnectionConnectRequest,
   type SavedConnectionList,
   type SavedConnectionRequest,
+  type VariableNodeRequest,
 } from "@ostudio/contracts";
 import { createAuthenticator, authConstants, type AuthSession } from "./auth.js";
 
@@ -50,6 +51,9 @@ export interface RuntimeShutdownHooks {
     id: string,
     request: SavedConnectionConnectRequest,
   ): Promise<void | SavedConnectionConnectResult>;
+  inspectVariable?(request: VariableNodeRequest): Promise<void>;
+  addToWatchlist?(request: VariableNodeRequest): Promise<void>;
+  removeFromWatchlist?(request: VariableNodeRequest): Promise<void>;
   setReadOnly?(readOnly: true): Promise<void> | void;
   disconnect?(): Promise<void>;
   close?(): Promise<void>;
@@ -210,6 +214,24 @@ function requestPath(request: FastifyRequest, origin: string): string {
 function sameOrigin(request: FastifyRequest, config: RuntimeConfig): boolean {
   return request.headers.origin === config.publicOrigin;
 }
+function sameOriginEventStream(request: FastifyRequest, config: RuntimeConfig): boolean {
+  if (request.headers.origin !== undefined) return sameOrigin(request, config);
+  if (request.headers["sec-fetch-site"] !== "same-origin" || !request.headers.host) return false;
+  try {
+    const publicUrl = new URL(config.publicOrigin);
+    const requestUrl = new URL(`${publicUrl.protocol}//${request.headers.host}`);
+    return (
+      requestUrl.origin === config.publicOrigin &&
+      !requestUrl.username &&
+      !requestUrl.password &&
+      requestUrl.pathname === "/" &&
+      !requestUrl.search &&
+      !requestUrl.hash
+    );
+  } catch {
+    return false;
+  }
+}
 
 function securityHeaders(reply: FastifyReply): void {
   reply.header(
@@ -359,20 +381,20 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     if (client.closed) return;
     if (expireEventClient(client)) return;
     if (client.paused) {
-      if (event.type === "live-value-changed") {
-        const nodeId = "nodeId" in event.payload ? event.payload.nodeId : undefined;
-        const index =
-          nodeId === undefined
-            ? -1
-            : client.queue.findIndex(
-                (queued) =>
-                  queued.type === event.type && "nodeId" in queued.payload && queued.payload.nodeId === nodeId,
-              );
-        if (index >= 0) {
-          client.queue.splice(index, 1);
-          client.queue.push(event);
-          return;
-        }
+      const nodeId = "nodeId" in event.payload ? event.payload.nodeId : undefined;
+      const index = client.queue.findIndex((queued) => {
+        if (event.type === "snapshot-required") return queued.type === event.type;
+        return (
+          event.type === "live-value-changed" &&
+          queued.type === event.type &&
+          "nodeId" in queued.payload &&
+          queued.payload.nodeId === nodeId
+        );
+      });
+      if (index >= 0) {
+        client.queue.splice(index, 1);
+        client.queue.push(event);
+        return;
       }
       if (client.queue.length >= SSE_QUEUE_LIMIT) {
         closeEventClient(client);
@@ -552,7 +574,9 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       pathname.startsWith("/api/v1/controller/") ||
       pathname.startsWith("/api/v1/opcua/") ||
       pathname.startsWith("/api/v1/address-space/") ||
-      pathname.startsWith("/api/v1/saved-connections");
+      pathname.startsWith("/api/v1/saved-connections") ||
+      pathname.startsWith("/api/v1/variables/") ||
+      pathname.startsWith("/api/v1/watchlist/");
     if (isLogin && !sameOrigin(request, config)) {
       void reply.code(403).send(errorBody("origin_rejected", "The request origin is not allowed."));
       return;
@@ -566,7 +590,10 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       }
       return;
     }
-    if ((request.method !== "GET" || pathname === "/api/v1/events") && !sameOrigin(request, config)) {
+    if (
+      (request.method !== "GET" || pathname === "/api/v1/events") &&
+      !(pathname === "/api/v1/events" ? sameOriginEventStream(request, config) : sameOrigin(request, config))
+    ) {
       void reply.code(403).send(errorBody("origin_rejected", "The request origin is not allowed."));
       return;
     }
@@ -653,6 +680,9 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
         safety: { readOnly: true, safetyGeneration: 1 },
         connection: { state: "disconnected" as const },
         nodes: [],
+        watchlist: [],
+        inspections: {},
+        trends: {},
       }),
       sequence: snapshotSequence,
       buildVersion,
@@ -885,6 +915,12 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     const secret = body?.userSecret ?? body?.password;
     return typeof secret === "string" ? { userSecret: secret } : {};
   };
+  const variableNodeRequest = (request: FastifyRequest): VariableNodeRequest | undefined => {
+    const body = requestBody<VariableNodeRequest>(request);
+    return body && typeof body.nodeId === "string" && body.nodeId.length > 0 && body.nodeId.length <= 512
+      ? { nodeId: body.nodeId }
+      : undefined;
+  };
   const runtimeError = (
     reply: FastifyReply,
     code: "discovery_failed" | "connection_failed" | "operation_failed",
@@ -1019,6 +1055,60 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       }
     }),
   );
+  const variableCommandError = (reply: FastifyReply, error: unknown): void => {
+    const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+    if (code === "watchlist_limit_reached") {
+      void reply.code(409).send(errorBody("watchlist_limit_reached", "The Watchlist limit has been reached."));
+    } else if (code === "invalid_request") {
+      void reply.code(400).send(errorBody("bad_request", "The requested Variable Node is invalid."));
+    } else if (code === "connection_required") {
+      void reply.code(409).send(errorBody("connection_required", "An OPC UA connection is required."));
+    } else {
+      runtimeError(reply, "operation_failed");
+    }
+  };
+  server.post("/api/v1/variables/inspect", async (request, reply) =>
+    controllerCommand(request, reply, async () => {
+      const body = variableNodeRequest(request);
+      if (!body) return void reply.code(400).send(errorBody("bad_request", "The Variable Node identifier is invalid."));
+      if (!options.runtime?.inspectVariable) return runtimeError(reply, "operation_failed");
+      try {
+        await options.runtime.inspectVariable(body);
+        publishEvent("snapshot-required", { reason: "reconnect" });
+        return currentSnapshot(request);
+      } catch (error) {
+        variableCommandError(reply, error);
+      }
+    }),
+  );
+  server.post("/api/v1/watchlist/add", async (request, reply) =>
+    controllerCommand(request, reply, async () => {
+      const body = variableNodeRequest(request);
+      if (!body) return void reply.code(400).send(errorBody("bad_request", "The Variable Node identifier is invalid."));
+      if (!options.runtime?.addToWatchlist) return runtimeError(reply, "operation_failed");
+      try {
+        await options.runtime.addToWatchlist(body);
+        publishEvent("snapshot-required", { reason: "reconnect" });
+        return currentSnapshot(request);
+      } catch (error) {
+        variableCommandError(reply, error);
+      }
+    }),
+  );
+  server.post("/api/v1/watchlist/remove", async (request, reply) =>
+    controllerCommand(request, reply, async () => {
+      const body = variableNodeRequest(request);
+      if (!body) return void reply.code(400).send(errorBody("bad_request", "The Variable Node identifier is invalid."));
+      if (!options.runtime?.removeFromWatchlist) return runtimeError(reply, "operation_failed");
+      try {
+        await options.runtime.removeFromWatchlist(body);
+        publishEvent("snapshot-required", { reason: "reconnect" });
+        return currentSnapshot(request);
+      } catch (error) {
+        variableCommandError(reply, error);
+      }
+    }),
+  );
   server.get("/api/v1/diagnostics", async () => diagnostics);
   server.get("/api/v1/events", async (request, reply) => {
     const rawAfter = new URL(request.url, config.publicOrigin).searchParams.get("afterSequence");
@@ -1062,14 +1152,17 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       (client.heartbeat as NodeJS.Timeout).unref();
     eventClients.add(client);
     reply.raw.on("drain", () => flushEventClient(client));
+    client.paused = !client.response.write(": connected\n\n");
     const oldest = eventHistory[0]?.sequence;
     if (after === 0) {
       publishEvent("snapshot-required", { reason: "initial" });
     } else if (after > sequence || (after < sequence && (oldest === undefined || after < oldest - 1))) {
       publishEvent("snapshot-required", { reason: "gap" });
     } else {
-      for (const event of eventHistory) {
-        if (event.sequence > after) sendEvent(client, event);
+      const replay = eventHistory.filter((event) => event.sequence > after);
+      const latestSnapshotRequired = replay.filter((event) => event.type === "snapshot-required").at(-1);
+      for (const event of replay) {
+        if (event.type !== "snapshot-required" || event === latestSnapshotRequired) sendEvent(client, event);
       }
     }
     const close = (): void => closeEventClient(client);

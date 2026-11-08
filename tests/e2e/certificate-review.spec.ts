@@ -30,6 +30,9 @@ test("explicit certificate review acceptance is saved before reconnect is enable
           safety: { readOnly: true, safetyGeneration: 1 },
           connection: { state: "disconnected" },
           nodes: [],
+          watchlist: [],
+          inspections: {},
+          trends: {},
         },
       });
     } else if (url.pathname === "/api/v1/events") {

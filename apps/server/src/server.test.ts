@@ -284,6 +284,9 @@ describe("server routes", () => {
           safety: { readOnly: true, safetyGeneration: 1 },
           connection: { state: "disconnected" },
           nodes: [],
+          watchlist: [],
+          inspections: {},
+          trends: {},
         }),
         connectSavedConnection: async (id, request) => {
           connected.push(id);
@@ -390,6 +393,9 @@ describe("server routes", () => {
         identityStatus: "unverified",
       },
       nodes: [],
+      watchlist: [],
+      inspections: {},
+      trends: {},
     });
     server = await createServer({
       env: developmentEnvironment,
@@ -1452,6 +1458,75 @@ describe("server routes", () => {
     clock.setTime(24 * 60 * 60 * 1000);
     response.resume();
     await expect(body).resolves.not.toContain('"reason":"reconnect"');
+  });
+
+  it("validates native EventSource attachments without weakening origin checks", async () => {
+    server = await createServer({ env: developmentEnvironment });
+    const login = await server.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { origin: "http://localhost:8080" },
+      payload: { username: "admin", password: "correct horse battery staple" },
+    });
+    const cookie = String(login.headers["set-cookie"]);
+    const eventRequest = (headers: Record<string, string>) =>
+      server!.inject({ method: "GET", url: "/api/v1/events?afterSequence=0", headers: { cookie, ...headers } });
+
+    const rejectedHeaders: Array<Record<string, string>> = [
+      { origin: "https://evil.example", "sec-fetch-site": "same-origin", host: "localhost:8080" },
+      { origin: "null", "sec-fetch-site": "same-origin", host: "localhost:8080" },
+      { "sec-fetch-site": "cross-site", host: "localhost:8080" },
+      { "sec-fetch-site": "same-site", host: "localhost:8080" },
+      { host: "localhost:8080" },
+      { "sec-fetch-site": "same-origin", host: "evil.example" },
+    ];
+    for (const headers of rejectedHeaders) {
+      expect((await eventRequest(headers)).statusCode).toBe(403);
+    }
+    expect(
+      (
+        await server.inject({
+          method: "POST",
+          url: "/api/v1/auth/logout",
+          headers: { cookie },
+        })
+      ).statusCode,
+    ).toBe(403);
+
+    const accepted = eventRequest({ "sec-fetch-site": "same-origin", host: "localhost:8080" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await server.shutdown();
+    const response = await accepted;
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain('"type":"snapshot-required"');
+  });
+
+  it("coalesces replaceable snapshot events when replaying an SSE history", async () => {
+    server = await createServer({ env: developmentEnvironment });
+    const login = await server.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { origin: "http://localhost:8080" },
+      payload: { username: "admin", password: "correct horse battery staple" },
+    });
+    const cookie = String(login.headers["set-cookie"]);
+    server.publishEvent("snapshot-required", { reason: "reconnect" });
+    server.publishEvent("snapshot-required", { reason: "reconnect" });
+    server.publishEvent("ownership-changed", { role: "observer", controllerGeneration: 2 });
+    server.publishEvent("snapshot-required", { reason: "reconnect" });
+    const streamRequest = server.inject({
+      method: "GET",
+      url: "/api/v1/events?afterSequence=1",
+      headers: { origin: "http://localhost:8080", cookie },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await server.shutdown();
+    const response = await streamRequest;
+    expect(response.body).toMatch(/^: connected\n\n/);
+    const events = [...response.body.matchAll(/data: ([^\n]+)/g)].map((match) => JSON.parse(match[1]!));
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => event.type)).toEqual(["ownership-changed", "snapshot-required"]);
+    expect(events.at(-1)).toMatchObject({ sequence: 4, payload: { reason: "reconnect" } });
   });
 
   it("uses server-owned event sequences and emits a gap resynchronization", async () => {
