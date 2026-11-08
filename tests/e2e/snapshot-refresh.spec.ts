@@ -32,6 +32,9 @@ test("slow snapshots progress during events and interrupted responses stay stale
     route.fulfill({ json: { role: "observer", controllerGeneration: 1 } }),
   );
   await page.route("**/api/v1/diagnostics", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/v1/saved-connections", (route) =>
+    route.fulfill({ json: { mode: "ephemeral", savedConnections: [] } }),
+  );
 
   let sequence = 0;
   let failNext = false;
