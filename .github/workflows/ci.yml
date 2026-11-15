@@ -40,5 +40,5 @@ jobs:
           cache: npm
       - run: npm install --global npm@11.13.0 --ignore-scripts
       - run: npm ci
-      - run: npx playwright install --with-deps ${{ matrix.browser }}
+      - run: npm exec --no -- playwright install --with-deps ${{ matrix.browser }}
       - run: npm run test:e2e -- --project=${{ matrix.browser }}
