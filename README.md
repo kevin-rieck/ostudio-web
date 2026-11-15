@@ -24,8 +24,22 @@ The Wails/Svelte/Go desktop application is maintained separately in [`kevin-riec
 
 ## Requirements
 
-- Node.js 24 or newer
-- npm 11 or newer
+- Node.js 24.15.0 (pinned in `.node-version`)
+- npm 11.13.0
+
+Select the pinned Node.js version with your version manager, then install the pinned npm if needed:
+
+```sh
+npm install --global npm@11.13.0 --ignore-scripts
+```
+
+`package.json` and `.npmrc` enforce these exact versions during installation. CI uses the same pins; update them together with `.node-version` and the lockfile metadata.
+
+### Dependency release cooldown
+
+`.npmrc` sets [`min-release-age=7`](https://github.com/npm/cli/blob/v11.13.0/workspaces/config/lib/definitions/definitions.js): npm resolution excludes releases newer than seven days. Dependabot also has a [seven-day cooldown](https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#cooldown) for npm version updates; its security updates bypass that cooldown.
+
+This delays new dependency selection, not execution of already locked dependencies: `npm ci` consumes the reviewed lockfile without rechecking every publication date. Continue reviewing lockfile changes. A cooldown is not a malware scan and can delay security fixes. For an urgent fix, a maintainer must approve a one-off `npm install --min-release-age=0` with the specific package/version, review the resulting lockfile diff, and run validation; do not disable the committed policy.
 
 ## Development
 
