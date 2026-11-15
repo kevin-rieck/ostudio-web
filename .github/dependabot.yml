@@ -7,6 +7,12 @@ updates:
     groups:
       web-development-dependencies:
         dependency-type: development
+    # Compiler API and Node support changes need separate, deliberate upgrades.
+    ignore:
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+      - dependency-name: tsup
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
