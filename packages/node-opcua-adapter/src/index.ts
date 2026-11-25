@@ -838,7 +838,7 @@ class NodeOpcuaSession implements OpcUaSession {
   }
 
   async close(): Promise<void> {
-    await this.owner.disconnect();
+    await this.owner.closeSession(this);
   }
 }
 
@@ -977,10 +977,33 @@ class NodeOpcuaAdapter implements OpcUaClient {
     });
     let observedServerCertificate = false;
     let serverCertificateMismatch = false;
+    let established = false;
+    let abandonedSession = false;
+    let invalidateIdentity!: () => void;
+    const identityInvalidated = new Promise<void>((resolve) => (invalidateIdentity = resolve));
+    const guarded = <T>(operation: Promise<T>): Promise<T> =>
+      withDeadline(
+        Promise.race([
+          operation,
+          identityInvalidated.then(() => {
+            throw new Error("The server certificate changed.");
+          }),
+        ]),
+        this.connectTimeout,
+      );
+    let closingClient: Promise<void> | undefined;
+    const closeClient = (): Promise<void> => (closingClient ??= rawClient.disconnect().catch(() => undefined));
+    let lossNotified = false;
+    const notifyLoss = (event: OpcUaConnectionLoss) => {
+      if (lossNotified) return;
+      lossNotified = true;
+      this.notifyConnectionLoss(event);
+    };
     if (mode !== "None") {
       rawClient.on("secure_channel_created", (channel) =>
         channel.on("receive_chunk", (chunk) => {
           if (chunk.toString("ascii", 0, 3) !== "OPN") return;
+          if (serverCertificateMismatch) return;
           try {
             const stream = new BinaryStream(chunk);
             stream.length = 12;
@@ -992,33 +1015,33 @@ class NodeOpcuaAdapter implements OpcUaClient {
           } catch {
             serverCertificateMismatch = true;
           }
-          if (serverCertificateMismatch && this.rawClient === rawClient) void this.disconnect();
+          if (serverCertificateMismatch) {
+            invalidateIdentity();
+            if (this.rawClient === rawClient && this.session) {
+              notifyLoss({ code: "connection_lost", message: "The OPC UA connection was lost." });
+              if (this.rawClient === rawClient) void this.disconnect(true).catch(() => undefined);
+            } else if (!established) {
+              void closeClient();
+            }
+          }
         }),
       );
     }
-    let lossNotified = false;
-    const notifyLoss = (event: OpcUaConnectionLoss) => {
-      if (lossNotified) return;
-      lossNotified = true;
-      this.notifyConnectionLoss(event);
-    };
     try {
-      rawClient.on("connection_lost", () =>
-        notifyLoss({ code: "connection_lost", message: "The OPC UA connection was lost." }),
-      );
+      rawClient.on("connection_lost", () => {
+        if (this.rawClient === rawClient && this.session)
+          notifyLoss({ code: "connection_lost", message: "The OPC UA connection was lost." });
+      });
       rawClient.on("close", () => {
         if (this.rawClient === rawClient && this.session) {
           notifyLoss({ code: "session_closed", message: "The OPC UA connection was closed." });
         }
       });
-      await withDeadline(rawClient.connect(request.endpointUrl), this.connectTimeout);
+      await guarded(rawClient.connect(request.endpointUrl));
       if (mode !== "None" && (!observedServerCertificate || serverCertificateMismatch)) {
         throw new Error("The server certificate changed during secure channel creation.");
       }
-      const channelEndpoints = await withDeadline(
-        rawClient.getEndpoints({ endpointUrl: request.endpointUrl }),
-        this.connectTimeout,
-      );
+      const channelEndpoints = await guarded(rawClient.getEndpoints({ endpointUrl: request.endpointUrl }));
       const channelSelected = selectEndpoints(channelEndpoints, request.endpointUrl).find(
         (endpoint) => endpoint.securityMode === securityMode(mode) && endpoint.securityPolicyUri === policy,
       );
@@ -1040,29 +1063,47 @@ class NodeOpcuaAdapter implements OpcUaClient {
             fingerprint(librarySelected.serverCertificate) !== request.serverCertificateFingerprint?.toLowerCase()))
       )
         throw new Error("The endpoint changed during secure channel creation.");
-      const rawSession = await withDeadline(
-        rawClient.createSession(
+      if (serverCertificateMismatch) throw new Error("The server certificate changed before session creation.");
+      const pendingSession = rawClient
+        .createSession(
           request.userIdentity ? this.userIdentity(request.userIdentity) : { type: UserTokenType.Anonymous },
-        ),
-        this.connectTimeout,
-      );
+        )
+        .then(async (created) => {
+          if (serverCertificateMismatch || abandonedSession) {
+            await created.close(true).catch(() => undefined);
+            throw new Error("The server certificate changed during session creation.");
+          }
+          return created;
+        });
+      const rawSession = await guarded(pendingSession);
+      if (serverCertificateMismatch) {
+        await rawSession.close(true).catch(() => undefined);
+        throw new Error("The server certificate changed during session creation.");
+      }
+      established = true;
       this.rawClient = rawClient;
       const session = new NodeOpcuaSession(this, rawSession);
       this.session = session;
       return session;
     } catch {
-      await rawClient.disconnect().catch(() => undefined);
+      abandonedSession = true;
+      await closeClient();
       throw new NodeOpcuaAdapterError("connection_failed", "The OPC UA connection could not be established.");
     }
   }
 
-  async disconnect(): Promise<void> {
+  async closeSession(session: NodeOpcuaSession): Promise<void> {
+    if (this.session === session) await this.disconnect();
+  }
+
+  async disconnect(abortTransport = false): Promise<void> {
     const session = this.session;
     const client = this.rawClient;
     this.session = undefined;
     this.rawClient = undefined;
+    const closingTransport = abortTransport ? client?.disconnect().catch(() => undefined) : undefined;
     await session?.closeRaw();
-    await client?.disconnect().catch(() => undefined);
+    await (closingTransport ?? client?.disconnect().catch(() => undefined));
   }
 
   private notifyConnectionLoss(event: OpcUaConnectionLoss): void {

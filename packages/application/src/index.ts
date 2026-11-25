@@ -907,13 +907,22 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
           }),
           "connection-changed",
         );
+        const generation = state.connection.connectionGeneration + 1;
+        let connectedSession: OpcUaSession | undefined;
+        let lostBeforeReady = false;
         try {
-          session = await client.connect(request);
-          resetSessionState(true);
-          const generation = state.connection.connectionGeneration + 1;
-          const connectedSession = session;
           unsubscribeConnectionLoss?.();
-          unsubscribeConnectionLoss = client.onConnectionLost(() => connectionLost(generation, connectedSession));
+          unsubscribeConnectionLoss = client.onConnectionLost(() => {
+            if (connectedSession) connectionLost(generation, connectedSession);
+            else lostBeforeReady = true;
+          });
+          connectedSession = await client.connect(request);
+          if (lostBeforeReady) {
+            await client.disconnect();
+            throw new ApplicationError("connection_required", "The OPC UA connection was lost during connection.");
+          }
+          session = connectedSession;
+          resetSessionState(true);
           update(
             (current) => ({
               ...current,
@@ -930,6 +939,8 @@ export function createApplication(dependencies: ApplicationDependencies): Applic
           );
           markSafety(true);
         } catch (error) {
+          unsubscribeConnectionLoss?.();
+          unsubscribeConnectionLoss = undefined;
           dependencies.logger?.error?.("OPC UA connection failed.", { code: "connection_failed" });
           update(
             (current) => ({
