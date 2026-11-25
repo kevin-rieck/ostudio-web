@@ -1,4 +1,4 @@
-import { createHash, type KeyObject } from "node:crypto";
+import { createHash, X509Certificate, type KeyObject } from "node:crypto";
 import {
   AccessLevelFlag,
   AttributeIds,
@@ -153,9 +153,93 @@ function timeout(options: NodeOpcuaAdapterOptions, key: keyof NodeOpcuaAdapterOp
   return typeof value === "number" ? value : fallback;
 }
 
+function derEnd(bytes: Buffer, start: number, limit: number, depth = 0): number {
+  const invalid = (): never => {
+    throw new Error("Invalid certificate chain.");
+  };
+  if (depth > 64 || start >= limit) return invalid();
+  const tag = bytes[start]!;
+  if (tag === 0) return invalid();
+  let offset = start + 1;
+  if ((tag & 0x1f) === 0x1f) {
+    if (offset >= limit || (bytes[offset]! & 0x7f) === 0) return invalid();
+    while (offset < limit && (bytes[offset++]! & 0x80) !== 0) {
+      /* read high tag number */
+    }
+    if (offset >= limit || (offset === start + 2 && bytes[start + 1]! < 31)) return invalid();
+  }
+  if (offset >= limit) return invalid();
+  const firstLength = bytes[offset++]!;
+  const lengthBytes = firstLength < 0x80 ? 0 : firstLength & 0x7f;
+  if (lengthBytes > 4 || firstLength === 0x80 || offset + lengthBytes > limit) return invalid();
+  if (lengthBytes && (bytes[offset] === 0 || (lengthBytes === 1 && bytes[offset]! < 0x80))) return invalid();
+  const length = lengthBytes ? bytes.readUIntBE(offset, lengthBytes) : firstLength;
+  offset += lengthBytes;
+  const end = offset + length;
+  if (end > limit) return invalid();
+  if ((tag & 0x20) !== 0) {
+    let child = offset;
+    while (child < end) child = derEnd(bytes, child, end, depth + 1);
+  } else if (tag === 1 && (length !== 1 || (bytes[offset] !== 0 && bytes[offset] !== 0xff))) return invalid();
+  else if (
+    tag === 2 &&
+    (length === 0 ||
+      (length > 1 &&
+        ((bytes[offset] === 0 && bytes[offset + 1]! < 0x80) || (bytes[offset] === 0xff && bytes[offset + 1]! >= 0x80))))
+  )
+    return invalid();
+  else if (
+    tag === 3 &&
+    (length === 0 ||
+      bytes[offset]! > 7 ||
+      (length === 1 && bytes[offset] !== 0) ||
+      (length > 1 && (bytes[end - 1]! & ((1 << bytes[offset]!) - 1)) !== 0))
+  )
+    return invalid();
+  else if (tag === 5 && length !== 0) return invalid();
+  else if (tag === 6) {
+    if (!length || (bytes[end - 1]! & 0x80) !== 0) return invalid();
+    for (let i = offset; i < end; i++)
+      if ((i === offset || (bytes[i - 1]! & 0x80) === 0) && bytes[i] === 0x80) return invalid();
+  }
+  return end;
+}
+
 function fingerprint(certificate: Buffer | undefined): string | undefined {
   if (!certificate?.length) return undefined;
-  return `sha256:${createHash("sha256").update(certificate).digest("hex")}`;
+  let offset = 0;
+  let leaf: Buffer | undefined;
+  while (offset < certificate.length) {
+    if (certificate[offset] !== 0x30) throw new Error("Invalid certificate chain.");
+    const end = derEnd(certificate, offset, certificate.length);
+    const der = certificate.subarray(offset, end);
+    if (!new X509Certificate(der).raw.equals(der)) throw new Error("Invalid certificate chain.");
+    leaf ??= der;
+    offset = end;
+  }
+  return `sha256:${createHash("sha256").update(leaf!).digest("hex")}`;
+}
+
+function selectEndpoints(endpoints: EndpointDescription[], requested: string): EndpointDescription[] {
+  const groups = new Map<string, EndpointDescription[]>();
+  for (const endpoint of endpoints) {
+    if (safeAdvertisedUrl(endpoint.endpointUrl ?? "", requested) === undefined) continue;
+    const key = JSON.stringify([endpoint.securityMode, endpoint.securityPolicyUri]);
+    const group = groups.get(key) ?? [];
+    group.push(endpoint);
+    groups.set(key, group);
+  }
+  return [...groups.values()].map((group) => {
+    const exact = group.filter((endpoint) => endpoint.endpointUrl === requested);
+    const candidates = exact.length ? exact : group;
+    const identity = (endpoint: EndpointDescription): string | undefined =>
+      endpoint.securityMode === MessageSecurityMode.None ? undefined : fingerprint(endpoint.serverCertificate);
+    const selected = candidates[0]!;
+    const pin = identity(selected);
+    if (candidates.some((candidate) => identity(candidate) !== pin))
+      throw new NodeOpcuaAdapterError("discovery_failed", "The OPC UA endpoint certificate is ambiguous.");
+    return selected;
+  });
 }
 
 function securityMode(value: OpcUaConnectRequest["securityMode"]): MessageSecurityMode {
@@ -811,8 +895,7 @@ class NodeOpcuaAdapter implements OpcUaClient {
           .slice(0, 32)
           .map(() => request.endpointUrl),
       })),
-      endpoints: result.endpoints
-        .filter((endpoint) => safeAdvertisedUrl(endpoint.endpointUrl ?? "", request.endpointUrl) !== undefined)
+      endpoints: selectEndpoints(result.endpoints, request.endpointUrl)
         .slice(0, 256)
         .map((endpoint) => endpointProjection(endpoint, request.endpointUrl)),
     };
@@ -834,11 +917,8 @@ class NodeOpcuaAdapter implements OpcUaClient {
     }
     const discovered = await this.discoverRaw(request.endpointUrl);
     const policy = request.securityPolicyUri ?? SecurityPolicy.None;
-    const selectedRaw = discovered.endpoints.find(
-      (endpoint) =>
-        safeAdvertisedUrl(endpoint.endpointUrl ?? "", request.endpointUrl) !== undefined &&
-        endpoint.securityMode === securityMode(mode) &&
-        endpoint.securityPolicyUri === policy,
+    const selectedRaw = selectEndpoints(discovered.endpoints, request.endpointUrl).find(
+      (endpoint) => endpoint.securityMode === securityMode(mode) && endpoint.securityPolicyUri === policy,
     );
     if (!selectedRaw)
       throw new NodeOpcuaAdapterError("endpoint_not_found", "The requested OPC UA endpoint was not advertised.");
@@ -907,7 +987,7 @@ class NodeOpcuaAdapter implements OpcUaClient {
             stream.readString();
             const actualCertificate = stream.readByteStream();
             observedServerCertificate = true;
-            if (fingerprint(actualCertificate ?? undefined) !== request.serverCertificateFingerprint)
+            if (fingerprint(actualCertificate ?? undefined) !== request.serverCertificateFingerprint?.toLowerCase())
               serverCertificateMismatch = true;
           } catch {
             serverCertificateMismatch = true;
@@ -935,6 +1015,31 @@ class NodeOpcuaAdapter implements OpcUaClient {
       if (mode !== "None" && (!observedServerCertificate || serverCertificateMismatch)) {
         throw new Error("The server certificate changed during secure channel creation.");
       }
+      const channelEndpoints = await withDeadline(
+        rawClient.getEndpoints({ endpointUrl: request.endpointUrl }),
+        this.connectTimeout,
+      );
+      const channelSelected = selectEndpoints(channelEndpoints, request.endpointUrl).find(
+        (endpoint) => endpoint.securityMode === securityMode(mode) && endpoint.securityPolicyUri === policy,
+      );
+      const matchingSecurity = (endpoint: EndpointDescription): boolean =>
+        endpoint.securityMode === securityMode(mode) && endpoint.securityPolicyUri === policy;
+      // node-opcua resolves its session endpoint by case-insensitive URL, then by security as a fallback.
+      const librarySelected =
+        channelEndpoints.find(
+          (endpoint) =>
+            matchingSecurity(endpoint) && endpoint.endpointUrl?.toLowerCase() === request.endpointUrl.toLowerCase(),
+        ) ?? (selectedRaw.endpointUrl === request.endpointUrl ? undefined : channelEndpoints.find(matchingSecurity));
+      if (
+        !channelSelected ||
+        !librarySelected ||
+        safeAdvertisedUrl(librarySelected.endpointUrl ?? "", request.endpointUrl) === undefined ||
+        (channelSelected.endpointUrl === request.endpointUrl && librarySelected.endpointUrl !== request.endpointUrl) ||
+        (mode !== "None" &&
+          (fingerprint(channelSelected.serverCertificate) !== request.serverCertificateFingerprint?.toLowerCase() ||
+            fingerprint(librarySelected.serverCertificate) !== request.serverCertificateFingerprint?.toLowerCase()))
+      )
+        throw new Error("The endpoint changed during secure channel creation.");
       const rawSession = await withDeadline(
         rawClient.createSession(
           request.userIdentity ? this.userIdentity(request.userIdentity) : { type: UserTokenType.Anonymous },

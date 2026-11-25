@@ -378,6 +378,142 @@ describe("server routes", () => {
     expect(saved).not.toHaveProperty("certificateReviewRequired");
   });
 
+  it.each(["lease expiry", "logout"])("does not save a reviewed pin after %s during lookup", async (loss) => {
+    const clock = fakeTimers();
+    clock.setTime(1_000);
+    const pin = `sha256:${"b".repeat(64)}`;
+    let blockLookup = false;
+    let releaseLookup!: () => void;
+    let lookupStarted!: () => void;
+    const started = new Promise<void>((resolve) => (lookupStarted = resolve));
+    const gate = new Promise<void>((resolve) => (releaseLookup = resolve));
+    let revoked!: () => void;
+    const revocation = new Promise<void>((resolve) => (revoked = resolve));
+    const save = vi.fn();
+    server = await createServer({
+      env: developmentEnvironment,
+      now: clock.now,
+      timers: clock.timers,
+      runtime: {
+        setReadOnly: async () => {
+          if (blockLookup) revoked();
+        },
+        listSavedConnections: async () => {
+          if (blockLookup) {
+            lookupStarted();
+            await gate;
+          }
+          return { mode: "durable", savedConnections: [] };
+        },
+        discover: async ({ endpointUrl }) => ({
+          servers: [],
+          endpoints: [
+            {
+              endpointUrl,
+              securityMode: "SignAndEncrypt",
+              securityPolicyUri: "http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256",
+              serverCertificateFingerprint: pin,
+            },
+          ],
+        }),
+        saveSavedConnection: save,
+      },
+    });
+    const login = await server.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { origin: "http://localhost:8080" },
+      payload: { username: "admin", password: "correct horse battery staple" },
+    });
+    const headers = { origin: "http://localhost:8080", cookie: String(login.headers["set-cookie"]) };
+    await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers });
+    const body = { endpoint: "opc.tcp://plc:4840", securityPolicy: "Basic256Sha256", securityMode: "SignAndEncrypt" };
+    const review = await server.inject({
+      method: "POST",
+      url: "/api/v1/saved-connections/plc/certificate-review?controllerGeneration=1",
+      headers,
+      payload: body,
+    });
+    expect(review.statusCode).toBe(200);
+    blockLookup = true;
+    const pending = server.inject({
+      method: "PUT",
+      url: "/api/v1/saved-connections/plc?controllerGeneration=1",
+      headers,
+      payload: { name: "PLC", ...body, serverCertificatePin: pin, certificateReviewId: review.json().reviewId },
+    });
+    await started;
+    let logout: Promise<unknown> | undefined;
+    if (loss === "lease expiry") clock.setTime(17_000);
+    else {
+      logout = server.inject({ method: "POST", url: "/api/v1/auth/logout", headers });
+      await revocation;
+    }
+    releaseLookup();
+    expect((await pending).statusCode).toBe(409);
+    await logout;
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("serializes takeover with an already-started Saved Connection write without reporting success", async () => {
+    let releaseWrite!: () => void;
+    let writeStarted!: () => void;
+    let takeoverRevoked!: () => void;
+    const gate = new Promise<void>((resolve) => (releaseWrite = resolve));
+    const started = new Promise<void>((resolve) => (writeStarted = resolve));
+    const revoked = new Promise<void>((resolve) => (takeoverRevoked = resolve));
+    let writing = false;
+    const save = vi.fn(async () => {
+      writing = true;
+      writeStarted();
+      await gate;
+    });
+    server = await createServer({
+      env: developmentEnvironment,
+      runtime: {
+        listSavedConnections: async () => ({ mode: "durable", savedConnections: [] }),
+        saveSavedConnection: save,
+        setReadOnly: async () => {
+          if (writing) takeoverRevoked();
+        },
+      },
+    });
+    const login = async () =>
+      String(
+        (
+          await server!.inject({
+            method: "POST",
+            url: "/api/v1/auth/login",
+            headers: { origin: "http://localhost:8080" },
+            payload: { username: "admin", password: "correct horse battery staple" },
+          })
+        ).headers["set-cookie"],
+      );
+    const first = { origin: "http://localhost:8080", cookie: await login() };
+    const second = { origin: "http://localhost:8080", cookie: await login() };
+    await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers: first });
+    const pending = server.inject({
+      method: "PUT",
+      url: "/api/v1/saved-connections/plc?controllerGeneration=1",
+      headers: first,
+      payload: { name: "PLC", endpoint: "opc.tcp://plc:4840", securityMode: "None", securityPolicy: "None" },
+    });
+    await started;
+    let takeoverFinished = false;
+    const takeover = server
+      .inject({ method: "POST", url: "/api/v1/controller/takeover", headers: second })
+      .then((response) => {
+        takeoverFinished = true;
+        return response;
+      });
+    await revoked;
+    expect(takeoverFinished).toBe(false);
+    releaseWrite();
+    expect((await pending).statusCode).toBe(409);
+    expect((await takeover).statusCode).toBe(200);
+    expect(save).toHaveBeenCalledTimes(1);
+  });
+
   it("returns typed not-found and bad-request responses for Saved Connection reconnects", async () => {
     const connected: string[] = [];
     server = await createServer({

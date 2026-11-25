@@ -808,7 +808,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   const controllerCommand = async <T>(
     request: FastifyRequest,
     reply: FastifyReply,
-    operation: () => Promise<T>,
+    operation: (controllerCurrent: () => boolean) => Promise<T>,
     connectionChange = false,
   ): Promise<T | undefined> =>
     serializeControl(async () => {
@@ -823,22 +823,23 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
           .send(errorBody("controller_generation_mismatch", "The controller lease is no longer current."));
         return;
       }
+      const controllerCurrent = (): boolean =>
+        authenticator.valid(session.id) &&
+        controllerOwner === session.id &&
+        generation === controllerGeneration &&
+        controllerLeaseExpiresAt !== undefined &&
+        now() < controllerLeaseExpiresAt;
       commandInFlight = true;
       try {
-        const result = await operation();
-        if (
-          !authenticator.valid(session.id) ||
-          controllerOwner !== session.id ||
-          generation !== controllerGeneration ||
-          controllerLeaseExpiresAt === undefined ||
-          now() >= controllerLeaseExpiresAt
-        ) {
+        const result = await operation(controllerCurrent);
+        if (!controllerCurrent()) {
           if (controllerOwner === session.id) await revokeControllerState();
           if (connectionChange && logoutRevokedSession !== session.id)
             await disconnectRuntime("Unable to disconnect the runtime after controller loss.");
-          void reply
-            .code(409)
-            .send(errorBody("controller_generation_mismatch", "The controller lease is no longer current."));
+          if (!reply.sent)
+            void reply
+              .code(409)
+              .send(errorBody("controller_generation_mismatch", "The controller lease is no longer current."));
           return;
         }
         return result;
@@ -1023,8 +1024,8 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     "/api/v1/saved-connections",
     async () => (await options.runtime?.listSavedConnections?.()) ?? { mode: "ephemeral", savedConnections: [] },
   );
-  server.put("/api/v1/saved-connections/:id", async (request, reply) =>
-    controllerCommand(request, reply, async () => {
+  server.put("/api/v1/saved-connections/:id", async (request, reply) => {
+    const saved = await controllerCommand(request, reply, async (controllerCurrent) => {
       const id = savedConnectionId(request);
       const body = savedConnectionRequest(request);
       if (!id || !body) return void reply.code(400).send(errorBody("bad_request", "The Saved Connection is invalid."));
@@ -1032,6 +1033,8 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
       try {
         if (!options.runtime.listSavedConnections) return runtimeError(reply, "operation_failed");
         const previous = (await options.runtime.listSavedConnections()).savedConnections.find((item) => item.id === id);
+        // Persistence starts only while the captured controller is current; an in-flight write cannot be rolled back.
+        if (!controllerCurrent()) return;
         const unchangedIdentity =
           previous &&
           previous.endpoint === body.endpoint &&
@@ -1066,12 +1069,13 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
         const saved = { ...body };
         delete saved.certificateReviewId;
         await options.runtime.saveSavedConnection(id, saved);
-        return reply.code(204).send();
+        return true;
       } catch {
         return runtimeError(reply, "operation_failed");
       }
-    }),
-  );
+    });
+    if (saved) return reply.code(204).send();
+  });
   server.delete("/api/v1/saved-connections/:id/delete", async (request, reply) =>
     controllerCommand(request, reply, async () => {
       const id = savedConnectionId(request);
