@@ -221,6 +221,18 @@ describe("server routes", () => {
     server = await createServer({
       env: developmentEnvironment,
       runtime: {
+        listSavedConnections: async () => ({ mode: "durable", savedConnections: [] }),
+        discover: async ({ endpointUrl }) => ({
+          servers: [],
+          endpoints: [
+            {
+              endpointUrl,
+              securityMode: "SignAndEncrypt",
+              securityPolicyUri: "http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256",
+              serverCertificateFingerprint: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            },
+          ],
+        }),
         saveSavedConnection: async (_id, request) => {
           saved.push(request);
         },
@@ -250,14 +262,27 @@ describe("server routes", () => {
       });
       expect(response.statusCode).toBe(400);
     }
+    const fingerprint = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const unreviewed = await server.inject({
+      method: "PUT",
+      url: "/api/v1/saved-connections/valid?controllerGeneration=1",
+      headers,
+      payload: { ...secure, serverCertificatePin: fingerprint },
+    });
+    expect(unreviewed.statusCode).toBe(409);
+    const reviewed = await server.inject({
+      method: "POST",
+      url: "/api/v1/saved-connections/valid/certificate-review?controllerGeneration=1",
+      headers,
+      payload: { endpoint: secure.endpoint, securityPolicy: secure.securityPolicy, securityMode: secure.securityMode },
+    });
+    expect(reviewed.statusCode).toBe(200);
+    expect(reviewed.json().fingerprint).toBe(fingerprint);
     const valid = await server.inject({
       method: "PUT",
       url: "/api/v1/saved-connections/valid?controllerGeneration=1",
       headers,
-      payload: {
-        ...secure,
-        serverCertificatePin: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      },
+      payload: { ...secure, serverCertificatePin: fingerprint, certificateReviewId: reviewed.json().reviewId },
     });
     expect(valid.statusCode).toBe(204);
     const review = await server.inject({
@@ -268,6 +293,89 @@ describe("server routes", () => {
     });
     expect(review.statusCode).toBe(204);
     expect(saved).toHaveLength(2);
+  });
+
+  it("binds certificate reviews to the discovered endpoint, prior record and controlling generation", async () => {
+    const oldPin = `sha256:${"a".repeat(64)}`;
+    const newPin = `sha256:${"b".repeat(64)}`;
+    let saved = {
+      id: "plc",
+      name: "PLC",
+      endpoint: "opc.tcp://plc:4840",
+      securityPolicy: "Basic256Sha256",
+      securityMode: "SignAndEncrypt" as const,
+      serverCertificatePin: oldPin,
+      certificateReviewRequired: true as const,
+    } as import("@ostudio/contracts").SavedConnection;
+    server = await createServer({
+      env: developmentEnvironment,
+      runtime: {
+        listSavedConnections: async () => ({ mode: "durable", savedConnections: [saved] }),
+        discover: async ({ endpointUrl }) => ({
+          servers: [],
+          endpoints: [
+            {
+              endpointUrl,
+              securityMode: "SignAndEncrypt",
+              securityPolicyUri: "http://opcfoundation.org/UA/SecurityPolicy#Basic256Sha256",
+              serverCertificateFingerprint: newPin,
+            },
+          ],
+        }),
+        saveSavedConnection: async (id, body) => {
+          saved = { id, ...body };
+        },
+      },
+    });
+    const login = async () =>
+      String(
+        (
+          await server!.inject({
+            method: "POST",
+            url: "/api/v1/auth/login",
+            headers: { origin: "http://localhost:8080" },
+            payload: { username: "admin", password: "correct horse battery staple" },
+          })
+        ).headers["set-cookie"],
+      );
+    const first = { origin: "http://localhost:8080", cookie: await login() };
+    const second = { origin: "http://localhost:8080", cookie: await login() };
+    const generation = (
+      await server.inject({ method: "POST", url: "/api/v1/controller/attach", headers: first })
+    ).json().controllerGeneration;
+    const reviewBody = {
+      endpoint: saved.endpoint,
+      securityPolicy: saved.securityPolicy,
+      securityMode: saved.securityMode,
+    };
+    const review = async (headers: typeof first, gen: number) =>
+      server!.inject({
+        method: "POST",
+        url: `/api/v1/saved-connections/plc/certificate-review?controllerGeneration=${gen}`,
+        headers,
+        payload: reviewBody,
+      });
+    const save = async (headers: typeof first, gen: number, token: string, endpoint = saved.endpoint) =>
+      server!.inject({
+        method: "PUT",
+        url: `/api/v1/saved-connections/plc?controllerGeneration=${gen}`,
+        headers,
+        payload: { name: "PLC", ...reviewBody, endpoint, serverCertificatePin: newPin, certificateReviewId: token },
+      });
+    const initial = await review(first, generation);
+    expect(initial.json()).toMatchObject({ fingerprint: newPin, previousFingerprint: oldPin });
+    expect((await save(first, generation, initial.json().reviewId, "opc.tcp://other:4840")).statusCode).toBe(409);
+    const stale = await review(first, generation);
+    const nextGeneration = (
+      await server.inject({ method: "POST", url: "/api/v1/controller/takeover", headers: second })
+    ).json().controllerGeneration;
+    expect((await save(first, generation, stale.json().reviewId)).statusCode).toBe(409);
+    expect((await save(second, nextGeneration, stale.json().reviewId)).statusCode).toBe(409);
+    const fresh = await review(second, nextGeneration);
+    expect((await save(second, nextGeneration, fresh.json().reviewId)).statusCode).toBe(204);
+    expect(saved.serverCertificatePin).toBe(newPin);
+    expect(saved).not.toHaveProperty("certificateReviewId");
+    expect(saved).not.toHaveProperty("certificateReviewRequired");
   });
 
   it("returns typed not-found and bad-request responses for Saved Connection reconnects", async () => {

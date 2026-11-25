@@ -1,3 +1,9 @@
+import { execFile } from "node:child_process";
+import { createPrivateKey } from "node:crypto";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
 import { DataType, StatusCodes, Variant, VariantArrayType } from "node-opcua";
 import type { UAMethod, UAVariable } from "node-opcua-address-space";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -132,6 +138,10 @@ beforeAll(async () => {
     maxReferencesPerNode: 1,
     maxBrowseRequests: 2,
     methodCallTimeout: 50,
+    resolveClientIdentity: async () => ({
+      certificate: server.getCertificate(),
+      privateKey: createPrivateKey(await readFile(fixture.serverCertificateManager.privateKey)),
+    }),
   });
 });
 
@@ -158,6 +168,43 @@ describe("production node-opcua adapter", () => {
     } finally {
       await client.disconnect();
     }
+  });
+
+  it("uses an in-memory discovery identity without creating default identity files", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "ostudio-no-pki-"));
+    try {
+      const script = `import { createNodeOpcuaAdapter } from './packages/node-opcua-adapter/src/index.ts'; const c = createNodeOpcuaAdapter({ applicationName: 'proof', applicationUri: 'urn:proof' }); await c.discover({ endpointUrl: process.env.PROOF_ENDPOINT }); await c.connect({ endpointUrl: process.env.PROOF_ENDPOINT, securityMode: 'None' }); await c.disconnect();`;
+      await promisify(execFile)(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+        env: {
+          ...process.env,
+          HOME: directory,
+          USERPROFILE: directory,
+          APPDATA: directory,
+          LOCALAPPDATA: directory,
+          PROOF_ENDPOINT: endpointUrl,
+        },
+      });
+      expect(await readdir(directory)).toEqual([]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("never falls back to the None identity for secure or invalid mounted credentials", async () => {
+    await expect(
+      adapter.connect({ endpointUrl, securityMode: "None", clientCertificateReference: "../invalid" }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+    const discovery = await adapter.discover({ endpointUrl });
+    const secure = discovery.endpoints.find((item) => item.securityMode === "SignAndEncrypt");
+    expect(secure?.serverCertificateFingerprint).toBeDefined();
+    await expect(
+      adapter.connect({
+        endpointUrl,
+        securityMode: "SignAndEncrypt",
+        securityPolicyUri: secure!.securityPolicyUri,
+        serverCertificateFingerprint: secure!.serverCertificateFingerprint,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
   });
 
   it("rejects an unbounded per-response browse reference override", () => {
@@ -293,6 +340,8 @@ describe("production node-opcua adapter", () => {
       securityMode: "SignAndEncrypt",
       securityPolicyUri: secureEndpoint!.securityPolicyUri,
       serverCertificateFingerprint: secureEndpoint!.serverCertificateFingerprint,
+      clientCertificateReference: "cert-test",
+      clientKeyReference: "key-test",
     });
     await session.close();
     await adapter.disconnect();

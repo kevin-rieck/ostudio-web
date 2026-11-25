@@ -1,10 +1,12 @@
-import { createHash } from "node:crypto";
+import { createHash, type KeyObject } from "node:crypto";
 import {
   AccessLevelFlag,
   AttributeIds,
+  BinaryStream,
   BrowseDirection,
   DataType,
   MessageSecurityMode,
+  InMemoryCertificateKeyPairProvider,
   NumericRange,
   OPCUAClient,
   SecurityPolicy,
@@ -55,6 +57,7 @@ import type {
   OpcUaValueHandler,
   TransportValue,
 } from "@ostudio/application";
+import { createOutboundTransportFactory, type OutboundPolicy } from "./outbound-transport";
 import {
   boundedString,
   safeAdvertisedUrl,
@@ -98,7 +101,11 @@ export class NodeOpcuaAdapterError extends Error {
 }
 
 export interface NodeOpcuaAdapterOptions extends OpcUaClientOptions {
-  clientCertificateManager?: RawOpcuaClientOptions["clientCertificateManager"];
+  outboundPolicy?: OutboundPolicy;
+  resolveClientIdentity?: (
+    certificateReference: string,
+    keyReference: string,
+  ) => Promise<{ certificate: Buffer; privateKey: KeyObject }>;
 }
 
 function withDeadline<T>(operation: Promise<T>, milliseconds: number): Promise<T> {
@@ -755,6 +762,8 @@ class NodeOpcuaAdapter implements OpcUaClient {
   private rawClient?: RawOpcuaClient;
   private session?: NodeOpcuaSession;
   private readonly listeners = new Set<(event: OpcUaConnectionLoss) => void>();
+  private readonly transportFactory: NonNullable<RawOpcuaClientOptions["transportFactory"]>;
+  private ephemeralIdentity?: Promise<InMemoryCertificateKeyPairProvider>;
 
   readonly maxBrowseRequests: number;
   readonly maxReferencesPerNode: number;
@@ -766,6 +775,7 @@ class NodeOpcuaAdapter implements OpcUaClient {
   readonly methodCallTimeout: number;
 
   constructor(private readonly options: NodeOpcuaAdapterOptions) {
+    this.transportFactory = createOutboundTransportFactory(options.outboundPolicy ?? {});
     this.maxBrowseRequests =
       boundedLimit(options.maxBrowseRequests, DEFAULT_MAX_BROWSE_REQUESTS, MAX_BROWSE_REQUESTS) || 1;
     this.maxReferencesPerNode = positiveBoundedLimit(
@@ -812,8 +822,17 @@ class NodeOpcuaAdapter implements OpcUaClient {
     if (this.rawClient || this.session) {
       throw new NodeOpcuaAdapterError("invalid_request", "An OPC UA session is already connected.");
     }
-    const discovered = await this.discoverRaw(request.endpointUrl);
     const mode = request.securityMode ?? "None";
+    if (
+      mode === "None" &&
+      (request.clientCertificateReference !== undefined || request.clientKeyReference !== undefined)
+    ) {
+      throw new NodeOpcuaAdapterError(
+        "invalid_request",
+        "Mounted credentials cannot be used with SecurityPolicy None.",
+      );
+    }
+    const discovered = await this.discoverRaw(request.endpointUrl);
     const policy = request.securityPolicyUri ?? SecurityPolicy.None;
     const selectedRaw = discovered.endpoints.find(
       (endpoint) =>
@@ -846,12 +865,57 @@ class NodeOpcuaAdapter implements OpcUaClient {
       );
     }
 
-    const rawClient = this.createRawClient({
+    let identity: Awaited<ReturnType<NonNullable<NodeOpcuaAdapterOptions["resolveClientIdentity"]>>> | undefined;
+    if (mode !== "None") {
+      if (!request.clientCertificateReference || !request.clientKeyReference || !this.options.resolveClientIdentity) {
+        throw new NodeOpcuaAdapterError(
+          "invalid_request",
+          "Mounted client credentials are required for secure connections.",
+        );
+      }
+      try {
+        identity = await this.options.resolveClientIdentity(
+          request.clientCertificateReference,
+          request.clientKeyReference,
+        );
+      } catch {
+        throw new NodeOpcuaAdapterError("connection_failed", "Mounted client credentials are unavailable.");
+      }
+    }
+    const rawClient = await this.createRawClient({
       securityMode: securityMode(mode),
       securityPolicy: securityPolicy(policy),
       endpointMustExist: selectedRaw.endpointUrl === request.endpointUrl,
       ...(selectedRaw?.serverCertificate ? { serverCertificate: selectedRaw.serverCertificate } : {}),
+      ...(identity
+        ? {
+            certificateKeyPairProvider: new InMemoryCertificateKeyPairProvider([identity.certificate], {
+              hidden: identity.privateKey.export({ format: "pem", type: "pkcs8" }).toString(),
+            }),
+          }
+        : {}),
     });
+    let observedServerCertificate = false;
+    let serverCertificateMismatch = false;
+    if (mode !== "None") {
+      rawClient.on("secure_channel_created", (channel) =>
+        channel.on("receive_chunk", (chunk) => {
+          if (chunk.toString("ascii", 0, 3) !== "OPN") return;
+          try {
+            const stream = new BinaryStream(chunk);
+            stream.length = 12;
+            stream.readString();
+            const actualCertificate = stream.readByteStream();
+            observedServerCertificate = true;
+            if (fingerprint(actualCertificate ?? undefined) !== request.serverCertificateFingerprint)
+              serverCertificateMismatch = true;
+          } catch {
+            serverCertificateMismatch = true;
+          }
+          if (serverCertificateMismatch && this.rawClient === rawClient) void this.disconnect();
+        }),
+      );
+    }
     let lossNotified = false;
     const notifyLoss = (event: OpcUaConnectionLoss) => {
       if (lossNotified) return;
@@ -868,6 +932,9 @@ class NodeOpcuaAdapter implements OpcUaClient {
         }
       });
       await withDeadline(rawClient.connect(request.endpointUrl), this.connectTimeout);
+      if (mode !== "None" && (!observedServerCertificate || serverCertificateMismatch)) {
+        throw new Error("The server certificate changed during secure channel creation.");
+      }
       const rawSession = await withDeadline(
         rawClient.createSession(
           request.userIdentity ? this.userIdentity(request.userIdentity) : { type: UserTokenType.Anonymous },
@@ -903,16 +970,31 @@ class NodeOpcuaAdapter implements OpcUaClient {
     }
   }
 
-  private createRawClient(overrides: Partial<RawOpcuaClientOptions>): RawOpcuaClient {
+  private async createRawClient(overrides: Partial<RawOpcuaClientOptions>): Promise<RawOpcuaClient> {
+    if (!overrides.certificateKeyPairProvider && overrides.securityMode !== MessageSecurityMode.None) {
+      throw new NodeOpcuaAdapterError(
+        "invalid_request",
+        "Mounted client credentials are required for secure connections.",
+      );
+    }
+    if (!overrides.certificateKeyPairProvider) {
+      this.ephemeralIdentity ??= (async () => {
+        const provider = new InMemoryCertificateKeyPairProvider();
+        await provider.ensureCertificateExists({
+          applicationUri: this.options.applicationUri,
+          subject: "/CN=OPC UA Studio",
+          dns: ["localhost"],
+        });
+        return provider;
+      })();
+      overrides = { ...overrides, certificateKeyPairProvider: await this.ephemeralIdentity };
+    }
     const clientOptions: RawOpcuaClientOptions = {
       applicationName: this.options.applicationName,
       applicationUri: this.options.applicationUri,
       connectionStrategy: { maxRetry: 0 },
+      transportFactory: this.transportFactory,
       defaultTransactionTimeout: this.options.defaultTransactionTimeout,
-      certificateFile: this.options.certificateFile,
-      privateKeyFile: this.options.privateKeyFile,
-      clientCertificateManager: this.options
-        .clientCertificateManager as RawOpcuaClientOptions["clientCertificateManager"],
       ...overrides,
     };
     return OPCUAClient.create(clientOptions);
@@ -922,7 +1004,7 @@ class NodeOpcuaAdapter implements OpcUaClient {
     servers: ApplicationDescription[];
     endpoints: EndpointDescription[];
   }> {
-    const client = this.createRawClient({
+    const client = await this.createRawClient({
       securityMode: MessageSecurityMode.None,
       securityPolicy: SecurityPolicy.None,
       endpointMustExist: false,

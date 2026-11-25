@@ -230,6 +230,8 @@ export interface OpcUaConnectRequest {
   securityMode?: "None" | "Sign" | "SignAndEncrypt";
   securityPolicyUri?: string;
   serverCertificateFingerprint?: string;
+  clientCertificateReference?: string;
+  clientKeyReference?: string;
   userIdentity?: { type: "anonymous" } | { type: "username"; username: string; password: string };
 }
 
@@ -243,8 +245,6 @@ export interface OpcUaClient {
 export interface OpcUaClientOptions {
   applicationName: string;
   applicationUri: string;
-  certificateFile?: string;
-  privateKeyFile?: string;
   defaultTransactionTimeout?: number;
   discoveryTimeout?: number;
   connectTimeout?: number;
@@ -277,6 +277,7 @@ export interface SavedConnection {
   securityMode: "None" | "Sign" | "SignAndEncrypt";
   username?: string;
   clientCertificateReference?: string;
+  clientKeyReference?: string;
   serverCertificatePin?: string;
   certificateReviewRequired?: boolean;
 }
@@ -521,13 +522,13 @@ function safeEndpoint(endpoint: string): string {
 }
 
 function safeConnection(connection: SavedConnection, logger?: Logger): SavedConnection {
-  const certificateReference = connection.clientCertificateReference;
-  const safeReference =
-    certificateReference === undefined || /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(certificateReference)
-      ? certificateReference
-      : undefined;
-  if (certificateReference !== undefined && safeReference === undefined)
-    logger?.warn?.("Ignored invalid client certificate reference.", { code: "invalid_certificate_reference" });
+  const safeReference = (value: string | undefined, prefix: string): string | undefined => {
+    if (value === undefined || new RegExp(`^${prefix}-[0-9a-f]{64}$`).test(value)) return value;
+    logger?.warn?.("Rejected invalid mounted credential reference.", { code: "invalid_certificate_reference" });
+    throw new ApplicationError("invalid_request", "A mounted credential reference is invalid.");
+  };
+  const certificateReference = safeReference(connection.clientCertificateReference, "cert");
+  const keyReference = safeReference(connection.clientKeyReference, "key");
   return {
     id: connection.id,
     name: connection.name,
@@ -535,7 +536,8 @@ function safeConnection(connection: SavedConnection, logger?: Logger): SavedConn
     securityPolicy: connection.securityPolicy,
     securityMode: connection.securityMode,
     ...(connection.username === undefined ? {} : { username: connection.username }),
-    ...(safeReference === undefined ? {} : { clientCertificateReference: safeReference }),
+    ...(certificateReference === undefined ? {} : { clientCertificateReference: certificateReference }),
+    ...(keyReference === undefined ? {} : { clientKeyReference: keyReference }),
     ...(connection.serverCertificatePin === undefined ? {} : { serverCertificatePin: connection.serverCertificatePin }),
     ...(connection.certificateReviewRequired === true ? { certificateReviewRequired: true } : {}),
   };

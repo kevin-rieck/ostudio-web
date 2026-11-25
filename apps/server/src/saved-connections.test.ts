@@ -66,7 +66,8 @@ describe("saved connection storage", () => {
       ...connection,
       password: "must-not-persist",
       privateKeyPath: "C:\\private.key",
-      clientCertificateReference: "client-certificate.pem",
+      clientCertificateReference: `cert-${"a".repeat(64)}`,
+      clientKeyReference: `key-${"b".repeat(64)}`,
     } as never);
     const file = path.join(directory, "saved-connections.json");
     const raw = await readFile(file, "utf8");
@@ -78,7 +79,13 @@ describe("saved connection storage", () => {
       expect((await stat(file)).mode & 0o777).toBe(0o600);
     }
     const reopened = await createFileSavedConnectionStore(directory);
-    await expect(reopened.list()).resolves.toEqual([connection]);
+    await expect(reopened.list()).resolves.toEqual([
+      {
+        ...connection,
+        clientCertificateReference: `cert-${"a".repeat(64)}`,
+        clientKeyReference: `key-${"b".repeat(64)}`,
+      },
+    ]);
   });
 
   it("flags legacy server certificate thumbprints for review instead of treating them as pins", async () => {

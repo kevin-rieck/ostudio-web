@@ -8,7 +8,7 @@ const FILE_NAME = "saved-connections.json";
 const MAX_CONNECTIONS = 100;
 const SHA256_PIN = /^sha256:[0-9a-f]{64}$/;
 
-type PersistedConnection = Omit<SavedConnection, "clientCertificateReference">;
+type PersistedConnection = SavedConnection;
 type Envelope = { version: 1; savedConnections: PersistedConnection[] };
 
 type StoredConnection = SavedConnection & { password?: string; privateKeyPath?: string };
@@ -30,6 +30,9 @@ function persisted(connection: StoredConnection): PersistedConnection {
     securityMode: connection.securityMode,
   };
   if (connection.username !== undefined) result.username = connection.username;
+  if (connection.clientCertificateReference !== undefined)
+    result.clientCertificateReference = connection.clientCertificateReference;
+  if (connection.clientKeyReference !== undefined) result.clientKeyReference = connection.clientKeyReference;
   if (connection.serverCertificatePin !== undefined) result.serverCertificatePin = connection.serverCertificatePin;
   if (connection.certificateReviewRequired === true) result.certificateReviewRequired = true;
   return result;
@@ -69,6 +72,17 @@ function parseConnection(value: unknown): PersistedConnection {
     securityMode,
   };
   if (record.username !== undefined) connection.username = boundedString(record.username, "username", 256);
+  for (const [field, prefix] of [
+    ["clientCertificateReference", "cert"],
+    ["clientKeyReference", "key"],
+  ] as const) {
+    if (record[field] !== undefined) {
+      const reference = boundedString(record[field], "mounted credential reference", 69);
+      if (!new RegExp(`^${prefix}-[0-9a-f]{64}$`).test(reference))
+        throw new Error("Saved Connection mounted credential reference is invalid.");
+      connection[field] = reference;
+    }
+  }
   const certificateReviewRequired = record.certificateReviewRequired === true;
   if (record.certificateReviewRequired !== undefined && !certificateReviewRequired)
     throw new Error("Saved Connection certificate review flag is invalid.");

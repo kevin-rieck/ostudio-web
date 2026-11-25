@@ -5,6 +5,8 @@ import {
   createApiClient,
   type DiagnosticReport,
   type EndpointDiscoveryResult,
+  type CertificateReview,
+  type MountedCredentialInventory,
   type SavedConnection,
   type Snapshot,
 } from "@ostudio/contracts";
@@ -40,6 +42,9 @@ export function App() {
   const [savedConnections, setSavedConnections] = useState<SavedConnection[]>([]);
   const [storageMode, setStorageMode] = useState<"durable" | "ephemeral">("durable");
   const [savedDraft, setSavedDraft] = useState<SavedConnection>(emptySavedConnection);
+  const [mounted, setMounted] = useState<MountedCredentialInventory>({ certificates: [], keys: [] });
+  const [certificateReview, setCertificateReview] = useState<CertificateReview>();
+  const [acceptedReviewId, setAcceptedReviewId] = useState<string>();
 
   const [savedSecret, setSavedSecret] = useState<SavedConnectionSecret>();
   const [diagnostics, setDiagnostics] = useState<DiagnosticReport>([]);
@@ -94,14 +99,16 @@ export function App() {
         while (!stopped) {
           const revision = snapshotRevision;
           const interruption = interruptionRevision;
-          const [current, report, saved] = await Promise.all([
+          const [current, report, saved, inventory] = await Promise.all([
             api.getSnapshot(),
             api.getDiagnosticReport(),
             api.listSavedConnections(),
+            api.listMountedCredentials(),
           ]);
           if (stopped) return current;
           if (interruption !== interruptionRevision) continue;
           setDiagnostics(report);
+          setMounted(inventory);
           setSavedConnections(saved.savedConnections);
           setStorageMode(saved.mode);
           setSnapshot(current);
@@ -228,6 +235,11 @@ export function App() {
     };
   }, [authenticated]);
 
+  useEffect(() => {
+    setCertificateReview(undefined);
+    setAcceptedReviewId(undefined);
+  }, [snapshot?.controller.controllerGeneration, snapshot?.controller.role, authenticated]);
+
   async function login(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     setMessage(undefined);
@@ -283,13 +295,35 @@ export function App() {
   }
 
   function editSaved(connection: SavedConnection): void {
+    setCertificateReview(undefined);
+    setAcceptedReviewId(undefined);
     setSavedDraft({ ...connection });
     setSavedSecret(undefined);
   }
 
   function newSaved(): void {
+    setCertificateReview(undefined);
+    setAcceptedReviewId(undefined);
     setSavedDraft(emptySavedConnection());
     setSavedSecret(undefined);
+  }
+
+  async function reviewCertificate(): Promise<void> {
+    await withWorking(async () => {
+      const id = savedDraft.id || crypto.randomUUID();
+      const review = await api.reviewSavedConnectionCertificate(
+        id,
+        {
+          endpoint: savedDraft.endpoint,
+          securityPolicy: savedDraft.securityPolicy,
+          securityMode: savedDraft.securityMode,
+        },
+        snapshot!.controller.controllerGeneration,
+      );
+      setSavedDraft((current) => ({ ...current, id }));
+      setAcceptedReviewId(undefined);
+      setCertificateReview(review);
+    }, "Certificate review could not be started.");
   }
 
   async function saveSaved(): Promise<void> {
@@ -303,12 +337,19 @@ export function App() {
           securityPolicy: savedDraft.securityPolicy,
           securityMode: savedDraft.securityMode,
           ...(savedDraft.username ? { username: savedDraft.username } : {}),
+          ...(savedDraft.clientCertificateReference
+            ? { clientCertificateReference: savedDraft.clientCertificateReference }
+            : {}),
+          ...(savedDraft.clientKeyReference ? { clientKeyReference: savedDraft.clientKeyReference } : {}),
+          ...(acceptedReviewId ? { certificateReviewId: acceptedReviewId } : {}),
           ...(savedDraft.serverCertificatePin ? { serverCertificatePin: savedDraft.serverCertificatePin } : {}),
           ...(savedDraft.certificateReviewRequired ? { certificateReviewRequired: true } : {}),
         },
         snapshot!.controller.controllerGeneration,
       );
       setSavedSecret(undefined);
+      setCertificateReview(undefined);
+      setAcceptedReviewId(undefined);
       const saved = await api.listSavedConnections();
       setSavedConnections(saved.savedConnections);
       setStorageMode(saved.mode);
@@ -470,13 +511,6 @@ export function App() {
                     This Saved Connection contains legacy certificate details. Review the endpoint, security settings,
                     and server certificate SHA-256 pin before accepting and saving.
                   </p>
-                  <button
-                    type="button"
-                    disabled={working}
-                    onClick={() => setSavedDraft((current) => ({ ...current, certificateReviewRequired: false }))}
-                  >
-                    Accept reviewed certificate details
-                  </button>
                 </div>
               )}
               {savedConnections.length > 0 && (
@@ -517,19 +551,35 @@ export function App() {
                 Security policy
                 <input
                   value={savedDraft.securityPolicy}
-                  onChange={(event) => setSavedDraft((current) => ({ ...current, securityPolicy: event.target.value }))}
+                  disabled={working}
+                  onChange={(event) => {
+                    setCertificateReview(undefined);
+                    setAcceptedReviewId(undefined);
+                    setSavedDraft((current) => ({
+                      ...current,
+                      securityPolicy: event.target.value,
+                      serverCertificatePin: undefined,
+                    }));
+                  }}
                 />
               </label>
               <label>
                 Security mode
                 <select
                   value={savedDraft.securityMode}
-                  onChange={(event) =>
+                  disabled={working}
+                  onChange={(event) => {
+                    setCertificateReview(undefined);
+                    setAcceptedReviewId(undefined);
                     setSavedDraft((current) => ({
                       ...current,
                       securityMode: event.target.value as SavedConnection["securityMode"],
-                    }))
-                  }
+                      serverCertificatePin: undefined,
+                      ...(event.target.value === "None"
+                        ? { clientCertificateReference: undefined, clientKeyReference: undefined }
+                        : {}),
+                    }));
+                  }}
                 >
                   <option value="None">None</option>
                   <option value="Sign">Sign</option>
@@ -537,14 +587,85 @@ export function App() {
                 </select>
               </label>
               <label>
-                Server certificate SHA-256 pin (required for secure connections)
-                <input
-                  value={savedDraft.serverCertificatePin ?? ""}
+                Client Certificate
+                <select
+                  disabled={working || savedDraft.securityMode === "None"}
+                  value={savedDraft.clientCertificateReference ?? ""}
                   onChange={(event) =>
-                    setSavedDraft((current) => ({ ...current, serverCertificatePin: event.target.value }))
+                    setSavedDraft((current) => ({
+                      ...current,
+                      clientCertificateReference: event.target.value || undefined,
+                    }))
                   }
-                />
+                >
+                  <option value="">Select mounted Client Certificate</option>
+                  {mounted.certificates.map((item) => (
+                    <option key={item.reference} value={item.reference}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
               </label>
+              <label>
+                Private key
+                <select
+                  disabled={working || savedDraft.securityMode === "None"}
+                  value={savedDraft.clientKeyReference ?? ""}
+                  onChange={(event) =>
+                    setSavedDraft((current) => ({
+                      ...current,
+                      clientKeyReference: event.target.value || undefined,
+                    }))
+                  }
+                >
+                  <option value="">Select mounted private key</option>
+                  {mounted.keys.map((item) => (
+                    <option key={item.reference} value={item.reference}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p>Trusted server certificate: {savedDraft.serverCertificatePin ?? "not accepted"}</p>
+              {savedDraft.securityMode === "None" && (
+                <p className="warning" role="status">
+                  SecurityPolicy None: OPC UA Server identity is unverified.
+                </p>
+              )}
+              <button
+                type="button"
+                disabled={working || !savedDraft.endpoint || !savedDraft.securityPolicy}
+                onClick={() => void reviewCertificate()}
+              >
+                Review OPC UA Server identity
+              </button>
+              {certificateReview && (
+                <div className="warning" role="alert">
+                  {certificateReview.previousFingerprint && (
+                    <p>Previously accepted: {certificateReview.previousFingerprint}</p>
+                  )}
+                  <p>
+                    {certificateReview.fingerprint
+                      ? `Discovered SHA-256 fingerprint: ${certificateReview.fingerprint}`
+                      : "SecurityPolicy None: OPC UA Server identity is unverified."}
+                  </p>
+                  <button
+                    type="button"
+                    disabled={working}
+                    onClick={() => {
+                      setSavedDraft((current) => ({
+                        ...current,
+                        serverCertificatePin: certificateReview.fingerprint,
+                        certificateReviewRequired: undefined,
+                      }));
+                      setAcceptedReviewId(certificateReview.reviewId);
+                      setCertificateReview(undefined);
+                    }}
+                  >
+                    Accept reviewed OPC UA Server identity
+                  </button>
+                </div>
+              )}
               <label>
                 Username (optional)
                 <input
@@ -583,7 +704,16 @@ export function App() {
                 Endpoint URL
                 <input
                   value={savedDraft.endpoint}
-                  onChange={(event) => setSavedDraft((current) => ({ ...current, endpoint: event.target.value }))}
+                  disabled={working}
+                  onChange={(event) => {
+                    setCertificateReview(undefined);
+                    setAcceptedReviewId(undefined);
+                    setSavedDraft((current) => ({
+                      ...current,
+                      endpoint: event.target.value,
+                      serverCertificatePin: undefined,
+                    }));
+                  }}
                   placeholder="opc.tcp://localhost:4840"
                 />
               </label>
@@ -612,13 +742,24 @@ export function App() {
                     <li key={`${endpoint.endpointUrl}-${endpoint.securityMode}-${endpoint.securityPolicyUri}`}>
                       <button
                         type="button"
+                        disabled={working}
                         onClick={() => {
+                          setCertificateReview(undefined);
+                          setAcceptedReviewId(undefined);
                           setSavedDraft((current) => ({
                             ...current,
                             endpoint: endpoint.endpointUrl,
                             securityMode: endpoint.securityMode,
                             securityPolicy: endpoint.securityPolicyUri,
-                            serverCertificatePin: endpoint.serverCertificateFingerprint,
+                            ...(endpoint.securityMode === "None"
+                              ? { clientCertificateReference: undefined, clientKeyReference: undefined }
+                              : {}),
+                            serverCertificatePin:
+                              current.endpoint === endpoint.endpointUrl &&
+                              current.securityMode === endpoint.securityMode &&
+                              current.securityPolicy === endpoint.securityPolicyUri
+                                ? current.serverCertificatePin
+                                : undefined,
                           }));
                         }}
                       >

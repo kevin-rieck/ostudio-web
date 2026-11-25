@@ -222,17 +222,19 @@ describe("application facade", () => {
       ["z", "display-exact"],
       ["😀", "prefix"],
     ]);
-    await application.saveSavedConnection({
-      id: "1",
-      name: savedConnectionFixture.input.name,
-      endpoint: savedConnectionFixture.input.endpoint,
-      securityPolicy: savedConnectionFixture.input.securityPolicy,
-      securityMode: savedConnectionFixture.input.securityMode as "SignAndEncrypt",
-      username: savedConnectionFixture.input.username,
-      clientCertificateReference: "D:\\\\private.key",
-      serverCertificatePin: savedConnectionFixture.input.serverCertificatePin,
-    });
-    expect(saved[0]).not.toHaveProperty("clientCertificateReference");
+    await expect(
+      application.saveSavedConnection({
+        id: "1",
+        name: savedConnectionFixture.input.name,
+        endpoint: savedConnectionFixture.input.endpoint,
+        securityPolicy: savedConnectionFixture.input.securityPolicy,
+        securityMode: savedConnectionFixture.input.securityMode as "SignAndEncrypt",
+        username: savedConnectionFixture.input.username,
+        clientCertificateReference: "D:\\\\private.key",
+        serverCertificatePin: savedConnectionFixture.input.serverCertificatePin,
+      }),
+    ).rejects.toThrow(/reference/i);
+    expect(saved).toHaveLength(0);
   });
 
   it("CRUD does not alter an active OPC UA session", async () => {
