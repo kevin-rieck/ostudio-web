@@ -13,7 +13,11 @@ test("explicit certificate review acceptance is saved before reconnect is enable
   const requests: SavedConnectionRequest[] = [];
   await page.route("**/api/v1/**", async (route) => {
     const url = new URL(route.request().url());
-    if (url.pathname === "/api/v1/saved-connections/legacy") {
+    if (url.pathname === "/api/v1/opcua/mounted-credentials") {
+      await route.fulfill({ json: { certificates: [], keys: [] } });
+    } else if (url.pathname === "/api/v1/saved-connections/legacy/certificate-review") {
+      await route.fulfill({ json: { reviewId: "review-token", fingerprint: `sha256:${"a".repeat(64)}` } });
+    } else if (url.pathname === "/api/v1/saved-connections/legacy") {
       const body = route.request().postDataJSON() as SavedConnectionRequest;
       requests.push(body);
       connection = { ...body, id: "legacy" };
@@ -49,12 +53,14 @@ test("explicit certificate review acceptance is saved before reconnect is enable
   const reconnect = page.getByRole("button", { name: "Reconnect", exact: true });
   await expect(reconnect).toBeDisabled();
   await page.getByRole("button", { name: "Edit", exact: true }).click();
-  await page.getByLabel("Server certificate SHA-256 pin").fill(`sha256:${"a".repeat(64)}`);
-  await page.getByRole("button", { name: "Accept reviewed certificate details" }).click();
+  await page.getByRole("button", { name: "Review OPC UA Server identity" }).click();
+  await expect(page.getByText(`Discovered SHA-256 fingerprint: sha256:${"a".repeat(64)}`)).toBeVisible();
+  await page.getByRole("button", { name: "Accept reviewed OPC UA Server identity" }).click();
   await expect(reconnect).toBeDisabled();
   await page.getByRole("button", { name: "Save Saved Connection", exact: true }).click();
   await expect(reconnect).toBeEnabled();
   expect(requests).toHaveLength(1);
   expect(requests[0]).not.toHaveProperty("certificateReviewRequired");
   expect(requests[0]?.serverCertificatePin).toBe(`sha256:${"a".repeat(64)}`);
+  expect(requests[0]?.certificateReviewId).toBe("review-token");
 });

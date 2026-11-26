@@ -13,6 +13,7 @@ import type {
 } from "@ostudio/contracts";
 import { createServer, type SavedConnectionConnectResult, type WebServer } from "./server.js";
 import { createFileSavedConnectionStore, createMemorySavedConnectionStore } from "./saved-connections.js";
+import { createMountedCertificateStore } from "./mounted-certificates.js";
 
 function displayValue(value: unknown): string {
   if (typeof value === "string") return value.slice(0, 4_096);
@@ -122,6 +123,13 @@ function snapshotForTransport(source: ApplicationSnapshot): Snapshot {
 
 export async function start(): Promise<void> {
   const serverRef: { current?: WebServer } = {};
+  const mounted = createMountedCertificateStore("/certs");
+  const rules = (value: string | undefined): string[] | undefined =>
+    value === undefined ? undefined : value.split(",").map((item) => item.trim());
+  const outboundPolicy = {
+    hosts: rules(process.env.OSTUDIO_OPCUA_ALLOWED_HOSTS),
+    addresses: rules(process.env.OSTUDIO_OPCUA_ALLOWED_ADDRESSES),
+  };
   const savedConnections =
     process.env.OSTUDIO_EPHEMERAL === "true"
       ? createMemorySavedConnectionStore()
@@ -145,7 +153,8 @@ export async function start(): Promise<void> {
         scheduleSnapshotEvent();
       },
     },
-    clientFactory: (options) => createNodeOpcuaAdapter(options),
+    clientFactory: (options) =>
+      createNodeOpcuaAdapter({ ...options, outboundPolicy, resolveClientIdentity: mounted.resolve }),
     savedConnections,
   });
   const runtime = {
@@ -157,6 +166,7 @@ export async function start(): Promise<void> {
         securityMode: "None",
         userIdentity: { type: "anonymous" },
       }),
+    listMountedCredentials: () => mounted.inventory(),
     listSavedConnections: async () => ({
       mode: savedConnections.mode,
       savedConnections: await application.listSavedConnections(),
@@ -181,6 +191,8 @@ export async function start(): Promise<void> {
           : `http://opcfoundation.org/UA/SecurityPolicy#${saved.securityPolicy}`,
         securityMode: saved.securityMode,
         ...(saved.serverCertificatePin ? { serverCertificateFingerprint: saved.serverCertificatePin } : {}),
+        ...(saved.clientCertificateReference ? { clientCertificateReference: saved.clientCertificateReference } : {}),
+        ...(saved.clientKeyReference ? { clientKeyReference: saved.clientKeyReference } : {}),
         ...(saved.username === undefined
           ? { userIdentity: { type: "anonymous" as const } }
           : { userIdentity: { type: "username" as const, username: saved.username, password: request.userSecret! } }),

@@ -287,6 +287,34 @@
         }
       }
     },
+    "/api/v1/opcua/mounted-credentials": {
+      "get": {
+        "operationId": "listMountedCredentials",
+        "security": [{ "sessionCookie": [] }],
+        "responses": {
+          "200": { "description": "Safe mounted credential references.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MountedCredentialInventory" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/saved-connections/{id}/certificate-review": {
+      "post": {
+        "operationId": "reviewSavedConnectionCertificate",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 128 } },
+          { "name": "controllerGeneration", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 } }
+        ],
+        "security": [{ "sessionCookie": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CertificateReviewRequest" } } } },
+        "responses": {
+          "200": { "description": "Discovered identity for explicit review; it has not yet been trusted.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CertificateReview" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/ControllerUnavailable" },
+          "502": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
     "/api/v1/saved-connections": {
       "get": {
         "operationId": "listSavedConnections",
@@ -570,6 +598,30 @@
         "required": ["endpointUrl"],
         "properties": { "endpointUrl": { "type": "string", "minLength": 1, "maxLength": 2048 } }
       },
+      "MountedCredential": {
+        "type": "object", "additionalProperties": false, "required": ["reference", "label"],
+        "properties": { "reference": { "type": "string" }, "label": { "type": "string" } }
+      },
+      "MountedCredentialInventory": {
+        "type": "object", "additionalProperties": false, "required": ["certificates", "keys"],
+        "properties": { "certificates": { "type": "array", "items": { "$ref": "#/components/schemas/MountedCredential" } }, "keys": { "type": "array", "items": { "$ref": "#/components/schemas/MountedCredential" } } }
+      },
+      "CertificateReviewRequest": {
+        "type": "object", "additionalProperties": false, "required": ["endpoint", "securityPolicy", "securityMode"],
+        "properties": {
+          "endpoint": { "type": "string", "minLength": 1, "maxLength": 2048 },
+          "securityPolicy": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "securityMode": { "type": "string", "enum": ["None", "Sign", "SignAndEncrypt"] }
+        }
+      },
+      "CertificateReview": {
+        "type": "object", "additionalProperties": false, "required": ["reviewId"],
+        "properties": {
+          "reviewId": { "type": "string" },
+          "fingerprint": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "previousFingerprint": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+        }
+      },
       "SavedConnection": {
         "type": "object",
         "additionalProperties": false,
@@ -581,6 +633,8 @@
           "securityPolicy": { "type": "string", "minLength": 1, "maxLength": 256 },
           "securityMode": { "type": "string", "enum": ["None", "Sign", "SignAndEncrypt"] },
           "username": { "type": "string", "maxLength": 256 },
+          "clientCertificateReference": { "type": "string", "pattern": "^cert-[0-9a-f]{64}$" },
+          "clientKeyReference": { "type": "string", "pattern": "^key-[0-9a-f]{64}$" },
           "serverCertificatePin": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
           "certificateReviewRequired": { "type": "boolean", "const": true }
         },
@@ -604,8 +658,11 @@
           "securityPolicy": { "type": "string", "minLength": 1, "maxLength": 256 },
           "securityMode": { "type": "string", "enum": ["None", "Sign", "SignAndEncrypt"] },
           "username": { "type": "string", "maxLength": 256 },
+          "clientCertificateReference": { "type": "string", "pattern": "^cert-[0-9a-f]{64}$" },
+          "clientKeyReference": { "type": "string", "pattern": "^key-[0-9a-f]{64}$" },
           "serverCertificatePin": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-          "certificateReviewRequired": { "type": "boolean", "const": true }
+          "certificateReviewRequired": { "type": "boolean", "const": true },
+          "certificateReviewId": { "type": "string", "minLength": 1, "maxLength": 128 }
         },
         "allOf": [
           {

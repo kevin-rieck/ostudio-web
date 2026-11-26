@@ -9,6 +9,8 @@ import {
   type BrowseRequest,
   type BrowseResult,
   type ConnectionDiagnostic,
+  type CertificateReviewRequest,
+  type MountedCredentialInventory,
   type EndpointDiscoveryRequest,
   type EndpointDiscoveryResult,
   type EventEnvelope,
@@ -45,6 +47,7 @@ export interface RuntimeShutdownHooks {
   browse?(request: BrowseRequest): Promise<BrowseResult>;
   search?(request: { query: string }): Promise<SearchResult>;
   listSavedConnections?(): Promise<SavedConnectionList>;
+  listMountedCredentials?(): Promise<MountedCredentialInventory>;
   saveSavedConnection?(id: string, request: SavedConnectionRequest): Promise<void>;
   deleteSavedConnection?(id: string): Promise<void>;
   connectSavedConnection?(
@@ -805,7 +808,7 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   const controllerCommand = async <T>(
     request: FastifyRequest,
     reply: FastifyReply,
-    operation: () => Promise<T>,
+    operation: (controllerCurrent: () => boolean) => Promise<T>,
     connectionChange = false,
   ): Promise<T | undefined> =>
     serializeControl(async () => {
@@ -820,22 +823,23 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
           .send(errorBody("controller_generation_mismatch", "The controller lease is no longer current."));
         return;
       }
+      const controllerCurrent = (): boolean =>
+        authenticator.valid(session.id) &&
+        controllerOwner === session.id &&
+        generation === controllerGeneration &&
+        controllerLeaseExpiresAt !== undefined &&
+        now() < controllerLeaseExpiresAt;
       commandInFlight = true;
       try {
-        const result = await operation();
-        if (
-          !authenticator.valid(session.id) ||
-          controllerOwner !== session.id ||
-          generation !== controllerGeneration ||
-          controllerLeaseExpiresAt === undefined ||
-          now() >= controllerLeaseExpiresAt
-        ) {
+        const result = await operation(controllerCurrent);
+        if (!controllerCurrent()) {
           if (controllerOwner === session.id) await revokeControllerState();
           if (connectionChange && logoutRevokedSession !== session.id)
             await disconnectRuntime("Unable to disconnect the runtime after controller loss.");
-          void reply
-            .code(409)
-            .send(errorBody("controller_generation_mismatch", "The controller lease is no longer current."));
+          if (!reply.sent)
+            void reply
+              .code(409)
+              .send(errorBody("controller_generation_mismatch", "The controller lease is no longer current."));
           return;
         }
         return result;
@@ -880,6 +884,9 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
             "securityPolicy",
             "securityMode",
             "username",
+            "clientCertificateReference",
+            "clientKeyReference",
+            "certificateReviewId",
             "serverCertificatePin",
             "certificateReviewRequired",
           ].includes(key),
@@ -899,6 +906,14 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
     const endpoint = sanitizeEndpoint(body.endpoint);
     if (endpoint === undefined) return undefined;
     if (body.username !== undefined && (typeof body.username !== "string" || body.username.length > 256))
+      return undefined;
+    if (body.clientCertificateReference !== undefined && !/^cert-[0-9a-f]{64}$/.test(body.clientCertificateReference))
+      return undefined;
+    if (body.clientKeyReference !== undefined && !/^key-[0-9a-f]{64}$/.test(body.clientKeyReference)) return undefined;
+    if (
+      body.certificateReviewId !== undefined &&
+      (typeof body.certificateReviewId !== "string" || body.certificateReviewId.length > 128)
+    )
       return undefined;
     const hasValidPin = typeof body.serverCertificatePin === "string" && SHA256_PIN.test(body.serverCertificatePin);
     if (body.serverCertificatePin !== undefined && !hasValidPin) return undefined;
@@ -927,24 +942,140 @@ export async function createServer(options: ServerOptions = {}): Promise<WebServ
   ): void => {
     void reply.code(502).send(errorBody(code, "The OPC UA operation could not be completed."));
   };
+  type CertificateReviewState = {
+    id: string;
+    owner: string;
+    generation: number;
+    expiresAt: number;
+    savedId: string;
+    endpoint: string;
+    securityPolicy: string;
+    securityMode: CertificateReviewRequest["securityMode"];
+    fingerprint?: string;
+    previous: string;
+  };
+  let pendingCertificateReview: CertificateReviewState | undefined;
+  server.get(
+    "/api/v1/opcua/mounted-credentials",
+    async () => options.runtime?.listMountedCredentials?.() ?? { certificates: [], keys: [] },
+  );
+  server.post("/api/v1/saved-connections/:id/certificate-review", async (request, reply) =>
+    controllerCommand(request, reply, async () => {
+      const id = savedConnectionId(request);
+      const body = requestBody<CertificateReviewRequest>(request);
+      const endpoint = sanitizeEndpoint(body?.endpoint);
+      if (
+        !id ||
+        !body ||
+        Object.keys(body).some((key) => !["endpoint", "securityPolicy", "securityMode"].includes(key)) ||
+        !endpoint ||
+        typeof body.securityPolicy !== "string" ||
+        !body.securityPolicy ||
+        body.securityPolicy.length > 256 ||
+        !["None", "Sign", "SignAndEncrypt"].includes(body.securityMode)
+      ) {
+        return void reply.code(400).send(errorBody("bad_request", "The certificate review request is invalid."));
+      }
+      if (!options.runtime?.discover || !options.runtime.listSavedConnections)
+        return runtimeError(reply, "discovery_failed");
+      try {
+        const previous = (await options.runtime.listSavedConnections()).savedConnections.find((item) => item.id === id);
+        const discovered = await options.runtime.discover({ endpointUrl: endpoint });
+        const policy = body.securityPolicy.startsWith("http://opcfoundation.org/UA/SecurityPolicy#")
+          ? body.securityPolicy
+          : `http://opcfoundation.org/UA/SecurityPolicy#${body.securityPolicy}`;
+        const match = discovered.endpoints.find(
+          (item) =>
+            item.endpointUrl === endpoint &&
+            item.securityMode === body.securityMode &&
+            item.securityPolicyUri === policy,
+        );
+        if (
+          !match ||
+          (body.securityMode !== "None" &&
+            (!match.serverCertificateFingerprint || !SHA256_PIN.test(match.serverCertificateFingerprint)))
+        ) {
+          return runtimeError(reply, "discovery_failed");
+        }
+        const review: CertificateReviewState = {
+          id: randomBytes(24).toString("base64url"),
+          owner: (request as RequestWithSession).authSession!.id,
+          generation: controllerGeneration,
+          expiresAt: now() + 60_000,
+          savedId: id,
+          endpoint,
+          securityPolicy: body.securityPolicy,
+          securityMode: body.securityMode,
+          ...(body.securityMode === "None" ? {} : { fingerprint: match.serverCertificateFingerprint }),
+          previous: JSON.stringify(previous ?? null),
+        };
+        pendingCertificateReview = review;
+        return {
+          reviewId: review.id,
+          ...(review.fingerprint ? { fingerprint: review.fingerprint } : {}),
+          ...(previous?.serverCertificatePin ? { previousFingerprint: previous.serverCertificatePin } : {}),
+        };
+      } catch {
+        return runtimeError(reply, "discovery_failed");
+      }
+    }),
+  );
   server.get(
     "/api/v1/saved-connections",
     async () => (await options.runtime?.listSavedConnections?.()) ?? { mode: "ephemeral", savedConnections: [] },
   );
-  server.put("/api/v1/saved-connections/:id", async (request, reply) =>
-    controllerCommand(request, reply, async () => {
+  server.put("/api/v1/saved-connections/:id", async (request, reply) => {
+    const saved = await controllerCommand(request, reply, async (controllerCurrent) => {
       const id = savedConnectionId(request);
       const body = savedConnectionRequest(request);
       if (!id || !body) return void reply.code(400).send(errorBody("bad_request", "The Saved Connection is invalid."));
       if (!options.runtime?.saveSavedConnection) return runtimeError(reply, "operation_failed");
       try {
-        await options.runtime.saveSavedConnection(id, body);
-        return reply.code(204).send();
+        if (!options.runtime.listSavedConnections) return runtimeError(reply, "operation_failed");
+        const previous = (await options.runtime.listSavedConnections()).savedConnections.find((item) => item.id === id);
+        // Persistence starts only while the captured controller is current; an in-flight write cannot be rolled back.
+        if (!controllerCurrent()) return;
+        const unchangedIdentity =
+          previous &&
+          previous.endpoint === body.endpoint &&
+          previous.securityPolicy === body.securityPolicy &&
+          previous.securityMode === body.securityMode &&
+          previous.serverCertificatePin === body.serverCertificatePin;
+        const needsReview =
+          (body.securityMode !== "None" && body.certificateReviewRequired !== true && !unchangedIdentity) ||
+          (previous?.certificateReviewRequired === true && body.certificateReviewRequired !== true) ||
+          (body.securityMode === "None" && body.serverCertificatePin !== undefined);
+        if (needsReview) {
+          const review = pendingCertificateReview;
+          pendingCertificateReview = undefined;
+          if (
+            !review ||
+            review.id !== body.certificateReviewId ||
+            review.owner !== (request as RequestWithSession).authSession!.id ||
+            review.generation !== controllerGeneration ||
+            review.expiresAt <= now() ||
+            review.savedId !== id ||
+            review.endpoint !== body.endpoint ||
+            review.securityPolicy !== body.securityPolicy ||
+            review.securityMode !== body.securityMode ||
+            review.fingerprint !== body.serverCertificatePin ||
+            review.previous !== JSON.stringify(previous ?? null)
+          ) {
+            return void reply
+              .code(409)
+              .send(errorBody("confirmation_required", "The certificate review is missing or no longer current."));
+          }
+        }
+        const saved = { ...body };
+        delete saved.certificateReviewId;
+        await options.runtime.saveSavedConnection(id, saved);
+        return true;
       } catch {
         return runtimeError(reply, "operation_failed");
       }
-    }),
-  );
+    });
+    if (saved) return reply.code(204).send();
+  });
   server.delete("/api/v1/saved-connections/:id/delete", async (request, reply) =>
     controllerCommand(request, reply, async () => {
       const id = savedConnectionId(request);

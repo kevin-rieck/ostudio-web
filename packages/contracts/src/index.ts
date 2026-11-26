@@ -24,6 +24,28 @@ export interface EndpointDiscoveryRequest {
   endpointUrl: string;
 }
 
+export interface MountedCredential {
+  reference: string;
+  label: string;
+}
+
+export interface MountedCredentialInventory {
+  certificates: MountedCredential[];
+  keys: MountedCredential[];
+}
+
+export interface CertificateReviewRequest {
+  endpoint: string;
+  securityPolicy: string;
+  securityMode: "None" | "Sign" | "SignAndEncrypt";
+}
+
+export interface CertificateReview {
+  reviewId: string;
+  fingerprint?: string;
+  previousFingerprint?: string;
+}
+
 export interface SavedConnection {
   id: string;
   name: string;
@@ -31,6 +53,8 @@ export interface SavedConnection {
   securityPolicy: string;
   securityMode: "None" | "Sign" | "SignAndEncrypt";
   username?: string;
+  clientCertificateReference?: string;
+  clientKeyReference?: string;
   serverCertificatePin?: string;
   certificateReviewRequired?: boolean;
 }
@@ -41,8 +65,11 @@ export interface SavedConnectionRequest {
   securityPolicy: string;
   securityMode: "None" | "Sign" | "SignAndEncrypt";
   username?: string;
+  clientCertificateReference?: string;
+  clientKeyReference?: string;
   serverCertificatePin?: string;
   certificateReviewRequired?: boolean;
+  certificateReviewId?: string;
 }
 
 export interface SavedConnectionConnectRequest {
@@ -387,6 +414,8 @@ export interface ApiClient {
   addToWatchlist(request: VariableNodeRequest, controllerGeneration: number): Promise<Snapshot>;
   removeFromWatchlist(request: VariableNodeRequest, controllerGeneration: number): Promise<Snapshot>;
   getDiagnosticReport(): Promise<DiagnosticReport>;
+  listMountedCredentials(): Promise<MountedCredentialInventory>;
+  reviewSavedConnectionCertificate(id: string, request: CertificateReviewRequest, controllerGeneration: number): Promise<CertificateReview>;
   listSavedConnections(): Promise<SavedConnectionList>;
   saveSavedConnection(id: string, request: SavedConnectionRequest, controllerGeneration: number): Promise<void>;
   deleteSavedConnection(id: string, controllerGeneration: number): Promise<void>;
@@ -490,6 +519,14 @@ export function createApiClient(transport: ContractTransport = defaultTransport,
 
   getDiagnosticReport(): Promise<DiagnosticReport> {
     return send<DiagnosticReport>("GET", "/api/v1/diagnostics");
+  },
+
+  listMountedCredentials(): Promise<MountedCredentialInventory> {
+    return send<MountedCredentialInventory>("GET", "/api/v1/opcua/mounted-credentials");
+  },
+
+  reviewSavedConnectionCertificate(id: string, request: CertificateReviewRequest, controllerGeneration: number): Promise<CertificateReview> {
+    return send<CertificateReview>("POST", "/api/v1/saved-connections/{id}/certificate-review".replace("{id}", encodeURIComponent(String(id))) + "?controllerGeneration=" + encodeURIComponent(String(controllerGeneration)), JSON.stringify(request));
   },
 
   listSavedConnections(): Promise<SavedConnectionList> {

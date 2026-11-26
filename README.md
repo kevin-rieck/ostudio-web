@@ -73,6 +73,12 @@ npm run build
 
 Durable Saved Connections are owned by the web process under `/data/saved-connections.json` (with restrictive permissions). Legacy desktop JSON is imported with a sanitized, versioned `.bak` backup before replacement; the backup is not a byte-for-byte copy because legacy records may contain passwords. Securely remove any pre-existing raw legacy copies or backups separately; corrupt or unsupported data prevents startup. Stop the desktop application before importing and do not run desktop and web processes as concurrent writers of the same file. Set `OSTUDIO_EPHEMERAL=true` only when loss on restart is acceptable.
 
+## Client Certificates and outbound policy
+
+Mount PEM Client Certificates and unencrypted PEM private keys read-only in `/certs`, as separate files with `.pem`, `.crt`, or `.key` extensions. Select both in the Saved Connection; the selected certificate and key must match. The browser sees opaque references and generic labels, not filenames or contents. Files are revalidated when connecting, and keys are not copied into `/data`. Secure endpoints require deliberate review and acceptance of the discovered SHA-256 server fingerprint; changed certificates require a new review. `SecurityPolicy None` does not verify server identity.
+
+Outbound discovery and connection are unrestricted by default. Set `OSTUDIO_OPCUA_ALLOWED_HOSTS` to a comma-separated list of exact hostnames and/or `OSTUDIO_OPCUA_ALLOWED_ADDRESSES` to comma-separated IP addresses or CIDRs. When both are set, both restrictions apply; invalid or empty rules prevent startup. Hostname-only restrictions trust the name's current DNS results, so also configure address restrictions when destination addresses must be constrained. Every DNS candidate is filtered before the socket dials. `NODEOPCUA_CLIENT_FORCE_ENDPOINT_DISCOVERY` must remain disabled because that library mode bypasses the guarded transport.
+
 ## Security posture
 
 `node-opcua`, Client Certificates, private keys, and OPC UA sockets remain server-side. Browser contracts must not expose private material, host paths, or raw library values. Read [`AGENTS.md`](AGENTS.md) before changing module placement or safety behavior.

@@ -127,15 +127,24 @@ Resolved for the tested version:
 - no automatic reconnect with `maxRetry: 0`; and
 - exact 64-bit values without JavaScript `number` conversion.
 
-**Unresolved: actual dial-address policy.** `node-opcua` accepts an endpoint URL
-and owns the TCP connection. Validating a hostname with `dns.lookup()` before
-calling `connect()` would not prove that the library dials the same address if
-DNS changes between validation and connection. The spike does not claim a
-hostname/IP/CIDR allowlist is enforced for the actual dial. Until a supported
-transport/address injection seam is proven, production policy must either use
-an endpoint URL whose resolved address is already trusted or keep this product
-constraint explicit; do not advertise DNS/IP policy enforcement based only on a
-separate lookup.
+### Actual dial-address policy follow-up (node-opcua 2.187.23)
+
+`packages/node-opcua-adapter/src/outbound-transport.test.ts` exercises the
+public `transportFactory` option with a `ClientTransportBase` subclass. The
+subclass keeps the original endpoint URL in HEL and checks literal addresses
+before TCP, or filters DNS answers inside the socket lookup that supplies the
+address to dial. Tests cover denied connections, IPv4 and IPv6 CIDRs, multiple
+and changed DNS answers, a late DNS answer after timeout, and real discovery
+followed by a secure channel. A hostname-only rule deliberately trusts the
+current DNS resolution; configure address rules as well to restrict destinations.
+A separate preliminary DNS lookup is not sufficient.
+
+The library's optional `NODEOPCUA_CLIENT_FORCE_ENDPOINT_DISCOVERY` mode creates
+an internal temporary client without forwarding the transport factory. The
+policy factory rejects that mode. Secure connections must supply the selected
+server certificate and automatic reconnect must remain disabled; otherwise
+other library paths can create an unguarded temporary discovery client. This
+follow-up proves the transport seam, not by itself a complete product policy.
 
 The production adapter in `packages/node-opcua-adapter` now uses these proven
 semantics. The executable coverage remains as a regression test and continues

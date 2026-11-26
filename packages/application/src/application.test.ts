@@ -198,7 +198,7 @@ describe("application facade", () => {
     expect(result.coverage).toBe("incomplete");
   });
 
-  it("orders display exact matches separately and uses safe connection references", async () => {
+  it("orders display exact matches and strips secrets from the Saved Connection fixture", async () => {
     const saved: unknown[] = [];
     const application = createApplication({
       clientFactory: client,
@@ -222,17 +222,30 @@ describe("application facade", () => {
       ["z", "display-exact"],
       ["😀", "prefix"],
     ]);
-    await application.saveSavedConnection({
-      id: "1",
-      name: savedConnectionFixture.input.name,
-      endpoint: savedConnectionFixture.input.endpoint,
-      securityPolicy: savedConnectionFixture.input.securityPolicy,
-      securityMode: savedConnectionFixture.input.securityMode as "SignAndEncrypt",
-      username: savedConnectionFixture.input.username,
-      clientCertificateReference: "D:\\\\private.key",
-      serverCertificatePin: savedConnectionFixture.input.serverCertificatePin,
+    const input = { ...savedConnectionFixture.input, id: "1", securityMode: "SignAndEncrypt" as const };
+    await application.saveSavedConnection(input);
+    expect(saved).toEqual([{ ...savedConnectionFixture.stored, id: "1" }]);
+    for (const field of savedConnectionFixture.strippedFields) {
+      expect(input).toHaveProperty(field);
+      expect(saved[0]).not.toHaveProperty(field);
+    }
+  });
+
+  it("rejects a path as a mounted credential reference", async () => {
+    const application = createApplication({
+      clientFactory: client,
+      savedConnections: store,
+      clock: { now: () => new Date() },
+      events: { publish: () => undefined },
     });
-    expect(saved[0]).not.toHaveProperty("clientCertificateReference");
+    await expect(
+      application.saveSavedConnection({
+        ...savedConnectionFixture.input,
+        id: "1",
+        securityMode: "SignAndEncrypt",
+        clientCertificateReference: "D:\\\\private.key",
+      }),
+    ).rejects.toThrow(/reference/i);
   });
 
   it("CRUD does not alter an active OPC UA session", async () => {
@@ -981,6 +994,36 @@ describe("application facade", () => {
     expect(unsubscribeCalls).toBe(1);
     expect(application.snapshot().watchlist).toEqual([]);
     expect(application.getTrend("ns=2;s=level")).toHaveLength(500);
+  });
+
+  it("rejects a connection lost before the session handoff completes", async () => {
+    let lost = (): void => undefined;
+    let disconnects = 0;
+    const opcua = client();
+    opcua.onConnectionLost = (listener) => {
+      lost = () => listener({ code: "connection_lost", message: "lost" });
+      return () => undefined;
+    };
+    const connect = opcua.connect;
+    opcua.connect = async (request) => {
+      const result = await connect(request);
+      lost();
+      return result;
+    };
+    opcua.disconnect = async () => {
+      disconnects += 1;
+    };
+    const application = createApplication({
+      clientFactory: () => opcua,
+      savedConnections: store,
+      clock: { now: () => new Date() },
+      events: { publish: () => undefined },
+    });
+    await expect(application.connect({ endpointUrl: "opc.tcp://plc:4840" })).rejects.toMatchObject({
+      code: "connection_required",
+    });
+    expect(application.snapshot()).toMatchObject({ connection: { state: "disconnected" }, safety: { readOnly: true } });
+    expect(disconnects).toBe(1);
   });
 
   it("marks an inspected value stale after loss and reports range violations", async () => {
