@@ -1,5 +1,5 @@
 import { lookup as dnsLookup } from "node:dns";
-import { BlockList, createConnection, isIP } from "node:net";
+import { BlockList, createConnection, isIP, type Socket } from "node:net";
 import { hostname as localHostname } from "node:os";
 import { domainToASCII } from "node:url";
 import { ClientTransportBase, parseEndpointUrl } from "node-opcua";
@@ -35,11 +35,13 @@ function normalizeHost(hostname: string): string {
 export function createOutboundTransportFactory(
   policy: OutboundPolicy,
   resolver: Resolver = resolve,
-): IClientTransportFactory {
+): IClientTransportFactory & { abort(): void } {
   // node-opcua's forced discovery creates a temporary client without the injected factory.
   if (forcedEndpointDiscovery || !!parseInt(process.env.NODEOPCUA_CLIENT_FORCE_ENDPOINT_DISCOVERY || "0", 10)) {
     throw new Error("Forced node-opcua endpoint discovery is incompatible with outbound policy.");
   }
+  const sockets = new Set<Socket>();
+  let aborted = false;
   const hosts = policy.hosts?.map(normalizeHost);
   const addresses = policy.addresses === undefined ? undefined : new BlockList();
   for (const rule of policy.addresses ?? []) {
@@ -67,6 +69,7 @@ export function createOutboundTransportFactory(
       let host: string;
       let port: number;
       try {
+        if (aborted) throw new Error("Transport aborted.");
         const endpoint = parseEndpointUrl(endpointUrl);
         if (endpoint.protocol !== "opc.tcp:" || endpoint.auth) throw new Error("Invalid OPC UA endpoint.");
         host = normalizeHost(endpoint.hostname);
@@ -94,6 +97,8 @@ export function createOutboundTransportFactory(
           });
         },
       });
+      sockets.add(socket);
+      socket.once("close", () => sockets.delete(socket));
       try {
         this._install_socket(socket);
       } catch (error) {
@@ -121,5 +126,11 @@ export function createOutboundTransportFactory(
       socket.once("connect", onConnect);
     }
   }
-  return { create: (settings) => new GuardedTransport(settings) };
+  return {
+    create: (settings) => new GuardedTransport(settings),
+    abort: () => {
+      aborted = true;
+      for (const socket of sockets) socket.destroy();
+    },
+  };
 }

@@ -846,7 +846,7 @@ class NodeOpcuaAdapter implements OpcUaClient {
   private rawClient?: RawOpcuaClient;
   private session?: NodeOpcuaSession;
   private readonly listeners = new Set<(event: OpcUaConnectionLoss) => void>();
-  private readonly transportFactory: NonNullable<RawOpcuaClientOptions["transportFactory"]>;
+  private readonly abortClientTransport = new WeakMap<RawOpcuaClient, () => void>();
   private ephemeralIdentity?: Promise<InMemoryCertificateKeyPairProvider>;
 
   readonly maxBrowseRequests: number;
@@ -859,7 +859,7 @@ class NodeOpcuaAdapter implements OpcUaClient {
   readonly methodCallTimeout: number;
 
   constructor(private readonly options: NodeOpcuaAdapterOptions) {
-    this.transportFactory = createOutboundTransportFactory(options.outboundPolicy ?? {});
+    createOutboundTransportFactory(options.outboundPolicy ?? {});
     this.maxBrowseRequests =
       boundedLimit(options.maxBrowseRequests, DEFAULT_MAX_BROWSE_REQUESTS, MAX_BROWSE_REQUESTS) || 1;
     this.maxReferencesPerNode = positiveBoundedLimit(
@@ -1019,8 +1019,10 @@ class NodeOpcuaAdapter implements OpcUaClient {
             invalidateIdentity();
             if (this.rawClient === rawClient && this.session) {
               notifyLoss({ code: "connection_lost", message: "The OPC UA connection was lost." });
+              this.abortClientTransport.get(rawClient)?.();
               if (this.rawClient === rawClient) void this.disconnect(true).catch(() => undefined);
             } else if (!established) {
+              this.abortClientTransport.get(rawClient)?.();
               void closeClient();
             }
           }
@@ -1135,15 +1137,18 @@ class NodeOpcuaAdapter implements OpcUaClient {
       })();
       overrides = { ...overrides, certificateKeyPairProvider: await this.ephemeralIdentity };
     }
+    const transportFactory = createOutboundTransportFactory(this.options.outboundPolicy ?? {});
     const clientOptions: RawOpcuaClientOptions = {
       applicationName: this.options.applicationName,
       applicationUri: this.options.applicationUri,
       connectionStrategy: { maxRetry: 0 },
-      transportFactory: this.transportFactory,
+      transportFactory,
       defaultTransactionTimeout: this.options.defaultTransactionTimeout,
       ...overrides,
     };
-    return OPCUAClient.create(clientOptions);
+    const client = OPCUAClient.create(clientOptions);
+    this.abortClientTransport.set(client, transportFactory.abort);
+    return client;
   }
 
   private async discoverRaw(endpointUrl: string): Promise<{

@@ -343,7 +343,9 @@ describe("production node-opcua adapter", () => {
       clientCertificateReference: "cert-test",
       clientKeyReference: "key-test",
     });
+    expect(server.engine.currentSessionCount).toBe(1);
     await session.close();
+    expect(server.engine.currentSessionCount).toBe(0);
     await adapter.disconnect();
   });
 
